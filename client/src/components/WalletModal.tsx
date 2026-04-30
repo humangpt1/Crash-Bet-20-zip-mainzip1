@@ -31,12 +31,19 @@ function formatPhoneInput(input: string) {
 interface WalletModalProps {
   open: boolean;
   onClose: () => void;
+  initialTab?: Tab;
 }
 
 type Tab = "deposit" | "withdraw" | "history";
 
-export function WalletModal({ open, onClose }: WalletModalProps) {
-  const [tab, setTab] = useState<Tab>("deposit");
+export function WalletModal({ open, onClose, initialTab = "deposit" }: WalletModalProps) {
+  const [tab, setTab] = useState<Tab>(initialTab);
+
+  // Sync the active tab whenever the parent re-opens the modal with a
+  // different default tab (e.g. clicking Deposit vs Withdraw button).
+  useEffect(() => {
+    if (open) setTab(initialTab);
+  }, [open, initialTab]);
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [amount, setAmount] = useState<string>("");

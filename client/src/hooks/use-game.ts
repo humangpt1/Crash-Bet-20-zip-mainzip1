@@ -41,9 +41,7 @@ export function useGame() {
   useQuery({
     queryKey: ["gameState"],
     queryFn: async () => {
-      const res = await fetch(api.game.state.path, {
-        credentials: "include",
-      });
+      const res = await fetch(api.game.state.path, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch initial game state");
       const data = await res.json();
       setGameState((prev) => ({ ...prev, ...data }));
@@ -54,29 +52,24 @@ export function useGame() {
   });
 
   // ─────────────────────────────────────────────
-  // Slots / Balances
+  // Wallet (single shared balance, in cents)
   // ─────────────────────────────────────────────
-  const { data: slots = [] } = useQuery({
-    queryKey: ["slots"],
+  const { data: wallet } = useQuery({
+    queryKey: [api.wallet.summary.path],
     queryFn: async () => {
-      if (!user) return [];
-      const res = await fetch("/api/slots", {
+      if (!user) return null;
+      const res = await fetch(api.wallet.summary.path, {
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to fetch slots");
+      if (!res.ok) return null;
       return await res.json();
     },
+    enabled: !!user,
     refetchInterval: 4000,
     staleTime: 3000,
   });
 
-  const slotBalances = useMemo<Record<number, number>>(() => {
-    const balances: Record<number, number> = {};
-    slots.forEach((slot: any, i: number) => {
-      balances[i] = slot.balance ?? 0;
-    });
-    return balances;
-  }, [slots]);
+  const walletBalance = wallet?.totalBalance ?? user?.walletBalance ?? 0;
 
   // ─────────────────────────────────────────────
   // History
@@ -84,9 +77,7 @@ export function useGame() {
   const { data: history = [] } = useQuery({
     queryKey: ["gameHistory"],
     queryFn: async () => {
-      const res = await fetch(api.game.history.path, {
-        credentials: "include",
-      });
+      const res = await fetch(api.game.history.path, { credentials: "include" });
       if (!res.ok) return [];
       return await res.json();
     },
@@ -104,7 +95,11 @@ export function useGame() {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
-      ws.onopen = () => console.log("WebSocket connected");
+      ws.onopen = () => {
+        if (user) {
+          ws.send(JSON.stringify({ type: "auth", userId: user.id }));
+        }
+      };
 
       ws.onmessage = (event) => {
         try {
@@ -135,9 +130,7 @@ export function useGame() {
                 crashPoint: payload.crashPoint,
               }));
 
-              queryClient.invalidateQueries({
-                queryKey: ["gameHistory"],
-              });
+              queryClient.invalidateQueries({ queryKey: ["gameHistory"] });
 
               setVisibleBets((prev) =>
                 prev.map((pb) =>
@@ -187,7 +180,36 @@ export function useGame() {
               break;
 
             case wsEvents.SERVER_BALANCE_UPDATE:
-              queryClient.setQueryData(["slots"], payload.slots);
+              // Server now sends { walletBalance } — refresh wallet summary.
+              queryClient.invalidateQueries({
+                queryKey: [api.wallet.summary.path],
+              });
+              break;
+
+            case wsEvents.SERVER_WALLET_UPDATE:
+              if (payload?.event === "deposit_success") {
+                toast({
+                  title: "Deposit confirmed",
+                  description: `KES ${Math.floor((payload.amount ?? 0) / 100).toLocaleString()} added to your wallet.`,
+                });
+              } else if (payload?.event === "withdrawal_paid") {
+                toast({
+                  title: "M-Pesa sent",
+                  description: `KES ${Math.floor((payload.amount ?? 0) / 100).toLocaleString()} paid out${payload.receipt ? " — " + payload.receipt : ""}.`,
+                });
+              } else if (payload?.event === "withdrawal_rejected") {
+                toast({
+                  title: "Withdrawal reversed",
+                  description: payload.reason || "Funds returned to your wallet.",
+                  variant: "destructive",
+                });
+              }
+              queryClient.invalidateQueries({
+                queryKey: [api.wallet.summary.path],
+              });
+              queryClient.invalidateQueries({
+                queryKey: [api.wallet.transactions.path],
+              });
               break;
           }
         } catch (err) {
@@ -209,7 +231,7 @@ export function useGame() {
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       wsRef.current?.close();
     };
-  }, [queryClient]);
+  }, [queryClient, user, toast]);
 
   // ─────────────────────────────────────────────
   const placeBetMutation = useMutation({
@@ -224,14 +246,6 @@ export function useGame() {
       playerIndex: number;
       queueForNext?: boolean;
     }) => {
-      // Use latest values of gameState only for logging, not for logic
-      console.log("[PLACE BET REQUEST]", {
-        gameStatus: gameState.status,
-        queueForNext,
-        slot: playerIndex,
-        amount,
-      });
-
       const res = await fetch(api.bets.place.path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -245,36 +259,22 @@ export function useGame() {
       });
 
       if (!res.ok) {
-        // Attempt to parse JSON error, fallback to generic
         const err = await res.json().catch(() => ({}));
         throw new Error(err.message || "Failed to place bet");
       }
 
-      const data = await res.json();
-
-      // Optionally update cache immediately
-      queryClient.setQueryData(["slots"], (old: any) => {
-        if (!old) return old;
-        return old.map((slot: any, idx: number) =>
-          idx === playerIndex
-            ? { ...slot, balance: (slot.balance ?? 0) - amount }
-            : slot,
-        );
-      });
-
-      return data;
+      return res.json();
     },
     onError: (err: Error) => {
       toast({
-        title: "Bet Failed",
+        title: "Bet failed",
         description: err.message,
         variant: "destructive",
       });
     },
-    onSuccess: (bet) => {
-      // Invalidate relevant queries to refresh UI
-      queryClient.invalidateQueries(["gameHistory"]);
-      queryClient.invalidateQueries(["slots"]);
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["gameHistory"] });
+      queryClient.invalidateQueries({ queryKey: [api.wallet.summary.path] });
     },
   });
 
@@ -299,10 +299,13 @@ export function useGame() {
     },
     onError: (err: Error) => {
       toast({
-        title: "Cashout Failed",
+        title: "Cashout failed",
         description: err.message,
         variant: "destructive",
       });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [api.wallet.summary.path] });
     },
   });
 
@@ -316,7 +319,7 @@ export function useGame() {
     activeBets: visibleBets,
     myBets,
     history,
-    slotBalances,
+    walletBalance,
     placeBet: placeBetMutation.mutateAsync,
     isPlacingBet: placeBetMutation.isPending,
     cashout: cashoutMutation.mutateAsync,

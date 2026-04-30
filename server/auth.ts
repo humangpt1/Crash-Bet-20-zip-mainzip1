@@ -136,8 +136,6 @@ export function setupAuth(app: Express) {
         }
       }
 
-      await storage.ensureSlots(user.id);
-
       req.login(user, (err) => {
         if (err) return next(err);
         res.status(201).json(sanitizeUser(user));

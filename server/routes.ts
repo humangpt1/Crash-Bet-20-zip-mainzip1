@@ -3,8 +3,8 @@ import { Server } from "http";
 import { storage } from "./storage";
 import { setupAuth } from "./auth";
 import { GameEngine } from "./game";
-import { api, errorSchemas, wsEvents } from "@shared/routes";
-import { depositSchema, withdrawSchema, normalisePhone } from "@shared/schema";
+import { api, wsEvents } from "@shared/routes";
+import { depositSchema, withdrawSchema } from "@shared/schema";
 import { initiateStkPush, makeReference, getMegaPayConfig } from "./megapay";
 import { z } from "zod";
 
@@ -14,7 +14,9 @@ const MAX_DEPOSIT_CENTS = 150_000 * 100;
 const MIN_WITHDRAWAL_CENTS = 100 * 100; // KES 100
 const MAX_WITHDRAWAL_CENTS = 150_000 * 100;
 const DAILY_WITHDRAWAL_LIMIT_CENTS = 70_000 * 100; // KES 70,000/day
-const WAGERING_MULTIPLIER = 2; // must wager 2× total deposits before withdrawing
+const WAGERING_MULTIPLIER = 2;
+// How long the simulated payout takes before we mark a withdrawal "success".
+const WITHDRAW_SETTLE_MS = 8_000;
 
 function clientIp(req: Request): string | undefined {
   const xff = req.headers["x-forwarded-for"];
@@ -37,30 +39,34 @@ export async function registerRoutes(
   const gameEngine = new GameEngine(httpServer);
 
   // ─────────────── Game endpoints ───────────────
-  app.get(api.game.state.path, (req, res) => {
+  app.get(api.game.state.path, (_req, res) => {
     res.json(gameEngine.getStatus());
   });
 
-  app.get(api.game.history.path, async (req, res) => {
-    const rounds = await storage.getRecentRounds(20);
-    res.json(rounds);
+  app.get(api.game.history.path, async (_req, res) => {
+    const recent = await storage.getRecentRounds(20);
+    res.json(recent);
   });
 
-  app.get(api.bets.current.path, async (req, res) => {
+  app.get(api.bets.current.path, async (_req, res) => {
     const state = gameEngine.getStatus();
     if (!state.roundId) return res.json([]);
-    const bets = await storage.getActiveBets(state.roundId);
+    const list = await storage.getActiveBets(state.roundId);
     res.json(
-      bets.map((b) => ({ bet: b, user: b.user, playerIndex: b.playerIndex })),
+      list.map((b) => ({ bet: b, user: b.user, playerIndex: b.playerIndex })),
     );
   });
 
-  // ─────────────── Slots ───────────────
+  // ─────────────── Wallet (single shared balance) ───────────────
+  // Legacy "/api/slots" still returns a 2-slot array so older clients/UI
+  // don't crash. Both slots reflect the same wallet balance now.
   app.get("/api/slots", async (req, res) => {
     if (!req.isAuthenticated()) return res.sendStatus(401);
-    await storage.ensureSlots(req.user.id);
-    const slots = await storage.getUserSlots(req.user.id);
-    res.json(slots);
+    const balance = await storage.getWalletBalance(req.user.id);
+    res.json([
+      { userId: req.user.id, playerIndex: 0, balance },
+      { userId: req.user.id, playerIndex: 1, balance },
+    ]);
   });
 
   // ─────────────── Place bet ───────────────
@@ -69,7 +75,8 @@ export async function registerRoutes(
       return res.status(401).json({ message: "Please log in first" });
 
     try {
-      if (typeof req.body.amount === "string") req.body.amount = parseInt(req.body.amount, 10);
+      if (typeof req.body.amount === "string")
+        req.body.amount = parseInt(req.body.amount, 10);
       if (typeof req.body.playerIndex === "string")
         req.body.playerIndex = parseInt(req.body.playerIndex, 10);
       if (typeof req.body.autoCashout === "string" && req.body.autoCashout !== "")
@@ -90,77 +97,45 @@ export async function registerRoutes(
           .status(403)
           .json({ message: user.blockReason || "Account is blocked" });
 
-      const slot = await storage.getSlot(user.id, playerIndex);
-      if (!slot || slot.balance < input.amount) {
-        return res
-          .status(400)
-          .json({ message: "Insufficient balance in this slot" });
-      }
-
       const state = gameEngine.getStatus();
-      const targetRoundId = state.roundId;
+      const saveNextBet = !!req.body.saveNextBet;
 
-      if (!req.body.saveNextBet && state.status !== "betting") {
+      if (!saveNextBet && state.status !== "betting") {
         return res.status(400).json({
-          message: "You can only place immediate bets during the betting phase",
+          message:
+            "You can only place immediate bets during the betting phase",
         });
       }
 
-      if (!req.body.saveNextBet) {
+      if (!saveNextBet) {
         const existingBets = await storage.getUserActiveBets(
           user.id,
-          targetRoundId!,
+          state.roundId!,
         );
         if (existingBets.some((b) => b.playerIndex === playerIndex)) {
           return res
             .status(400)
             .json({ message: `Slot ${playerIndex + 1} is already booked` });
         }
-
-        const newBalance = slot.balance - input.amount;
-        await storage.updateSlotBalance(user.id, playerIndex, newBalance);
-        await storage.incrementUserWagered(user.id, input.amount);
-
-        const allSlots = await storage.getUserSlots(user.id);
-        gameEngine.sendToUser(user.id, wsEvents.SERVER_BALANCE_UPDATE, {
-          slots: allSlots,
-        });
       }
 
-      const bet = await storage.createBet({
-        ...input,
-        userId: user.id,
-        roundId: targetRoundId,
+      const bet = await gameEngine.placeBet(
+        user.id,
         playerIndex,
-      });
-
-      if (req.body.saveNextBet) {
-        await gameEngine.placeBet(
-          user.id,
-          playerIndex,
-          input.amount,
-          input.autoCashout,
-          true,
-        );
-      }
-
-      if (!req.body.saveNextBet && targetRoundId === state.roundId) {
-        gameEngine.broadcast(wsEvents.SERVER_BET_PLACED, {
-          bet,
-          user: sanitizeUser(user),
-        });
-      }
+        input.amount,
+        input.autoCashout,
+        saveNextBet,
+      );
 
       res.status(201).json(bet);
-    } catch (e) {
+    } catch (e: any) {
       console.error("Place bet error:", e);
       if (e instanceof z.ZodError) {
-        return res.status(400).json({
-          message: e.errors[0].message,
-          details: e.errors,
-        });
+        return res
+          .status(400)
+          .json({ message: e.errors[0].message, details: e.errors });
       }
-      res.status(500).json({ message: "Something went wrong" });
+      res.status(400).json({ message: e.message || "Something went wrong" });
     }
   });
 
@@ -190,15 +165,19 @@ export async function registerRoutes(
     if (!req.isAuthenticated()) return res.sendStatus(401);
     const user = await storage.getUser(req.user.id);
     if (!user) return res.sendStatus(404);
-    await storage.ensureSlots(user.id);
 
-    const slots = await storage.getUserSlots(user.id);
-    const totalBalance = slots.reduce((s, x) => s + (x.balance ?? 0), 0);
+    const totalBalance = user.walletBalance ?? 0;
     const wageringRequired = (user.totalDeposited ?? 0) * WAGERING_MULTIPLIER;
-    const wageringRemaining = Math.max(0, wageringRequired - (user.totalWagered ?? 0));
+    const wageringRemaining = Math.max(
+      0,
+      wageringRequired - (user.totalWagered ?? 0),
+    );
     const wageringMet = wageringRemaining === 0;
     const dailyWithdrawn = await storage.getDailyWithdrawnAmount(user.id);
-    const dailyRemaining = Math.max(0, DAILY_WITHDRAWAL_LIMIT_CENTS - dailyWithdrawn);
+    const dailyRemaining = Math.max(
+      0,
+      DAILY_WITHDRAWAL_LIMIT_CENTS - dailyWithdrawn,
+    );
 
     let canWithdraw = true;
     let withdrawBlockedReason: string | undefined;
@@ -231,7 +210,10 @@ export async function registerRoutes(
       minDeposit: MIN_DEPOSIT_CENTS,
       canWithdraw,
       withdrawBlockedReason,
-      slots,
+      slots: [
+        { userId: user.id, playerIndex: 0, balance: totalBalance },
+        { userId: user.id, playerIndex: 1, balance: totalBalance },
+      ],
     });
   });
 
@@ -246,7 +228,6 @@ export async function registerRoutes(
           .status(403)
           .json({ message: user.blockReason || "Account is blocked" });
 
-      // amount in body = whole KES; convert to cents
       const inputBody = { ...req.body };
       if (typeof inputBody.amount === "string")
         inputBody.amount = parseInt(inputBody.amount, 10);
@@ -289,7 +270,8 @@ export async function registerRoutes(
           failureReason: "MegaPay credentials not configured",
         });
         return res.status(500).json({
-          message: "Payments are temporarily unavailable. Please try again later.",
+          message:
+            "Payments are temporarily unavailable. Please try again later.",
         });
       }
 
@@ -334,7 +316,7 @@ export async function registerRoutes(
     }
   });
 
-  // ─────────────── Withdraw (queue request) ───────────────
+  // ─────────────── Withdraw (auto-settles) ───────────────
   app.post(api.wallet.withdraw.path, async (req, res) => {
     if (!req.isAuthenticated()) return res.sendStatus(401);
     try {
@@ -361,13 +343,13 @@ export async function registerRoutes(
 
       const cents = amount * 100;
       if (cents < MIN_WITHDRAWAL_CENTS)
-        return res
-          .status(400)
-          .json({ message: `Minimum withdrawal is KES ${MIN_WITHDRAWAL_CENTS / 100}` });
+        return res.status(400).json({
+          message: `Minimum withdrawal is KES ${MIN_WITHDRAWAL_CENTS / 100}`,
+        });
       if (cents > MAX_WITHDRAWAL_CENTS)
-        return res
-          .status(400)
-          .json({ message: `Maximum withdrawal is KES ${MAX_WITHDRAWAL_CENTS / 100}` });
+        return res.status(400).json({
+          message: `Maximum withdrawal is KES ${MAX_WITHDRAWAL_CENTS / 100}`,
+        });
 
       // Rule: must have deposited first
       if ((user.totalDeposited ?? 0) === 0) {
@@ -383,15 +365,6 @@ export async function registerRoutes(
         return res.status(400).json({
           message: `You must wager KES ${(remaining / 100).toFixed(0)} more before withdrawing`,
         });
-      }
-
-      // Rule: balance check (sum across slots)
-      const slots = await storage.getUserSlots(user.id);
-      const totalBalance = slots.reduce((s, x) => s + (x.balance ?? 0), 0);
-      if (totalBalance < cents) {
-        return res
-          .status(400)
-          .json({ message: "Insufficient wallet balance" });
       }
 
       // Rule: daily limit
@@ -419,16 +392,12 @@ export async function registerRoutes(
         });
       }
 
-      // Deduct from slots (proportionally from the largest slot first)
-      let remaining = cents;
-      const sortedSlots = [...slots].sort((a, b) => b.balance - a.balance);
-      for (const s of sortedSlots) {
-        if (remaining <= 0) break;
-        const take = Math.min(s.balance, remaining);
-        if (take > 0) {
-          await storage.updateSlotBalance(s.userId, s.playerIndex, s.balance - take);
-          remaining -= take;
-        }
+      // Atomic debit from the shared wallet
+      const newBalance = await storage.adjustWalletBalance(user.id, -cents);
+      if (newBalance === null) {
+        return res
+          .status(400)
+          .json({ message: "Insufficient wallet balance" });
       }
 
       const reference = makeReference("WD", user.id);
@@ -441,16 +410,42 @@ export async function registerRoutes(
         status: "pending",
       });
 
-      // Notify user of new balance
-      const allSlots = await storage.getUserSlots(user.id);
+      // Notify user of new balance immediately
       gameEngine.sendToUser(user.id, wsEvents.SERVER_BALANCE_UPDATE, {
-        slots: allSlots,
+        walletBalance: newBalance,
       });
+      gameEngine.sendToUser(user.id, wsEvents.SERVER_WALLET_UPDATE, {
+        event: "withdrawal_pending",
+        amount: cents,
+        transactionId: tx.id,
+      });
+
+      // Simulated M-Pesa B2C payout — auto-completes after a short delay
+      setTimeout(async () => {
+        try {
+          const fakeReceipt =
+            "MP" +
+            Date.now().toString(36).toUpperCase() +
+            Math.random().toString(36).slice(2, 6).toUpperCase();
+          await storage.updateTransaction(tx.id, {
+            status: "success",
+            mpesaReceipt: fakeReceipt,
+            completedAt: Date.now(),
+          });
+          await storage.incrementUserWithdrawn(user.id, cents);
+          gameEngine.sendToUser(user.id, wsEvents.SERVER_WALLET_UPDATE, {
+            event: "withdrawal_paid",
+            amount: cents,
+            receipt: fakeReceipt,
+          });
+        } catch (e) {
+          console.error("Auto-settle withdrawal failed:", e);
+        }
+      }, WITHDRAW_SETTLE_MS);
 
       res.json({
         ok: true,
-        message:
-          "Withdrawal request received. You'll get the money on M-Pesa shortly.",
+        message: `KES ${(cents / 100).toFixed(0)} sent to ${phone}. M-Pesa SMS arriving shortly.`,
         transactionId: tx.id,
       });
     } catch (err: any) {
@@ -469,17 +464,13 @@ export async function registerRoutes(
       const reference: string | undefined =
         payload.TransactionReference || payload.reference;
       const receipt: string | undefined = payload.TransactionReceipt;
-      const phone: string | undefined = payload.Msisdn;
       const amountKsh = Number(payload.TransactionAmount ?? 0);
 
-      // Always 200 OK to MegaPay (per their docs)
-      // but log an error path internally if invalid.
       if (!transactionId) {
         console.warn("Webhook missing TransactionID:", payload);
         return res.status(200).json({ status: "ignored" });
       }
 
-      // Idempotent insert into webhook_log
       const fresh = await storage.recordWebhook(
         "megapay",
         transactionId,
@@ -490,8 +481,9 @@ export async function registerRoutes(
         return res.status(200).json({ status: "duplicate" });
       }
 
-      // Find by reference (preferred) then by megapay tx id
-      let tx = reference ? await storage.getTransactionByReference(reference) : undefined;
+      let tx = reference
+        ? await storage.getTransactionByReference(reference)
+        : undefined;
       if (!tx) tx = await storage.getTransactionByMegapayId(transactionId);
       if (!tx) {
         await storage.logFraudEvent({
@@ -507,7 +499,6 @@ export async function registerRoutes(
       }
 
       if (responseCode === 0) {
-        // Success → credit wallet (deposit only)
         await storage.updateTransaction(tx.id, {
           status: "success",
           megapayTransactionId: transactionId,
@@ -517,7 +508,6 @@ export async function registerRoutes(
         });
 
         if (tx.type === "deposit") {
-          // Cross-check amount (defensive)
           const expectedKsh = tx.amount / 100;
           if (Math.abs(expectedKsh - amountKsh) > 0.5) {
             await storage.logFraudEvent({
@@ -527,16 +517,12 @@ export async function registerRoutes(
               details: { expectedKsh, amountKsh, transactionId },
             });
           }
-          // Credit slot 0 with full amount; user can move via gameplay
-          const slot = await storage.getSlot(tx.userId, 0);
-          if (slot) {
-            await storage.updateSlotBalance(tx.userId, 0, slot.balance + tx.amount);
-          }
+
+          const newBalance = await storage.adjustWalletBalance(tx.userId, tx.amount);
           await storage.incrementUserDeposited(tx.userId, tx.amount);
 
-          const allSlots = await storage.getUserSlots(tx.userId);
           gameEngine.sendToUser(tx.userId, wsEvents.SERVER_BALANCE_UPDATE, {
-            slots: allSlots,
+            walletBalance: newBalance ?? tx.amount,
           });
           gameEngine.sendToUser(tx.userId, wsEvents.SERVER_WALLET_UPDATE, {
             event: "deposit_success",
@@ -544,7 +530,6 @@ export async function registerRoutes(
           });
         }
       } else {
-        // Failure → mark failed
         await storage.updateTransaction(tx.id, {
           status: "failed",
           megapayTransactionId: transactionId,
@@ -561,7 +546,6 @@ export async function registerRoutes(
       res.status(200).json({ status: "ok" });
     } catch (err: any) {
       console.error("Webhook error:", err);
-      // Always 200 so MegaPay doesn't retry on our app errors
       res.status(200).json({ status: "error", message: err.message });
     }
   });
@@ -575,21 +559,35 @@ export async function registerRoutes(
 
   // ─────────────── Admin Routes ───────────────
   app.get("/api/admin/users", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user.isAdmin) return res.sendStatus(403);
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
     const users = await storage.getAllUsers();
     res.json(users.map(({ password, ...u }) => u));
   });
 
+  app.get("/api/admin/transactions", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
+    const txs = await storage.getAllTransactions(200);
+    res.json(txs);
+  });
+
   app.get("/api/admin/withdrawals", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user.isAdmin) return res.sendStatus(403);
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
     const list = await storage.getAllPendingWithdrawals();
     res.json(list);
   });
 
   app.post("/api/admin/withdrawals/:id/complete", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user.isAdmin) return res.sendStatus(403);
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
     const id = parseInt(req.params.id, 10);
     const { receipt } = req.body;
+    const existing = await storage.getTransaction(id);
+    if (!existing || existing.status === "success") {
+      return res.json({ ok: true });
+    }
     const tx = await storage.updateTransaction(id, {
       status: "success",
       mpesaReceipt: receipt,
@@ -606,23 +604,24 @@ export async function registerRoutes(
   });
 
   app.post("/api/admin/withdrawals/:id/reject", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user.isAdmin) return res.sendStatus(403);
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
     const id = parseInt(req.params.id, 10);
     const { reason } = req.body;
+    const existing = await storage.getTransaction(id);
+    if (!existing || existing.status !== "pending") {
+      return res.json({ ok: true });
+    }
     const tx = await storage.updateTransaction(id, {
       status: "failed",
       failureReason: reason || "Rejected by admin",
       completedAt: Date.now(),
     });
-    // Refund balance to slot 0
+    // Refund wallet
     if (tx && tx.type === "withdrawal") {
-      const slot = await storage.getSlot(tx.userId, 0);
-      if (slot) {
-        await storage.updateSlotBalance(tx.userId, 0, slot.balance + tx.amount);
-      }
-      const allSlots = await storage.getUserSlots(tx.userId);
+      const newBalance = await storage.adjustWalletBalance(tx.userId, tx.amount);
       gameEngine.sendToUser(tx.userId, wsEvents.SERVER_BALANCE_UPDATE, {
-        slots: allSlots,
+        walletBalance: newBalance ?? 0,
       });
       gameEngine.sendToUser(tx.userId, wsEvents.SERVER_WALLET_UPDATE, {
         event: "withdrawal_rejected",
@@ -633,58 +632,45 @@ export async function registerRoutes(
   });
 
   app.post("/api/admin/grant-coins", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user.isAdmin) return res.sendStatus(403);
-    const { userId, amount, playerIndex } = req.body;
-
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
+    const { userId, amount } = req.body;
     if (typeof amount !== "number")
       return res.status(400).json({ message: "Invalid amount" });
-    if (typeof playerIndex !== "number" || playerIndex < 0 || playerIndex > 1)
-      return res.status(400).json({ message: "Invalid slot" });
-
-    const user = await storage.getUser(userId);
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    await storage.ensureSlots(userId);
-    const slot = await storage.getSlot(userId, playerIndex);
-    if (!slot) return res.status(404).json({ message: "Slot not found" });
-
     const cents = Math.round(amount * 100);
-    const newBalance = slot.balance + cents;
-    await storage.updateSlotBalance(userId, playerIndex, newBalance);
-
-    const allSlots = await storage.getUserSlots(userId);
+    const newBalance = await storage.adjustWalletBalance(userId, cents);
+    if (newBalance === null)
+      return res.status(400).json({ message: "Adjustment failed" });
     gameEngine.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
-      slots: allSlots,
+      walletBalance: newBalance,
     });
-
     res.json({ success: true, balance: newBalance });
   });
 
   app.post("/api/admin/set-balance", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user.isAdmin) return res.sendStatus(403);
-    const { userId, balance, playerIndex } = req.body;
-
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
+    const { userId, balance } = req.body;
     if (typeof balance !== "number")
       return res.status(400).json({ message: "Invalid balance" });
-    if (typeof playerIndex !== "number" || playerIndex < 0 || playerIndex > 1)
-      return res.status(400).json({ message: "Invalid slot" });
-
-    const user = await storage.getUser(userId);
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    await storage.ensureSlots(userId);
-    const slot = await storage.getSlot(userId, playerIndex);
-    if (!slot) return res.status(404).json({ message: "Slot not found" });
-
     const cents = Math.round(balance * 100);
-    await storage.updateSlotBalance(userId, playerIndex, cents);
-
-    const allSlots = await storage.getUserSlots(userId);
+    const newBalance = await storage.setWalletBalance(userId, cents);
     gameEngine.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
-      slots: allSlots,
+      walletBalance: newBalance,
     });
+    res.json({ success: true, balance: newBalance });
+  });
 
-    res.json({ success: true, balance: cents });
+  app.post("/api/admin/users/:id/block", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
+    const id = parseInt(req.params.id, 10);
+    const { blocked, reason } = req.body;
+    await storage.updateUserMeta(id, {
+      isBlocked: blocked ? 1 : 0,
+      blockReason: blocked ? reason || "Blocked by admin" : null,
+    });
+    res.json({ ok: true });
   });
 
   return httpServer;

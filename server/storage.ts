@@ -2,21 +2,16 @@ import {
   users,
   rounds,
   bets,
-  slots,
   transactions,
   webhookLog,
   fraudEvents,
   type User,
-  type InsertUser,
   type Bet,
-  type InsertBet,
   type Round,
   type Transaction,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, sql, gte } from "drizzle-orm";
-
-const SLOT_COUNT = 2;
 
 type AdminUserInsert = { username: string; password: string; isAdmin: number };
 type CreateUserInput = { phone: string; password: string; username?: string | null };
@@ -53,23 +48,13 @@ export class DatabaseStorage {
     return user;
   }
 
-  async createAdminUser(adminUser: AdminUserInsert): Promise<User> {
+  async createAdminUser(adminUser: AdminUserInsert & { phone?: string }): Promise<User> {
     const [user] = await db.insert(users).values(adminUser).returning();
     return user;
   }
 
-  async getAllUsers(): Promise<(User & { slots: any[] })[]> {
-    const allUsers = await db.select().from(users);
-    const usersWithSlots = await Promise.all(
-      allUsers.map(async (user) => {
-        const userSlots = await db
-          .select()
-          .from(slots)
-          .where(eq(slots.userId, user.id));
-        return { ...user, slots: userSlots };
-      }),
-    );
-    return usersWithSlots;
+  async getAllUsers(): Promise<User[]> {
+    return await db.select().from(users).orderBy(desc(users.id));
   }
 
   async updateUserMeta(
@@ -100,61 +85,65 @@ export class DatabaseStorage {
       .where(eq(users.id, id));
   }
 
-  // -------- SLOTS --------
-  async getSlot(userId: number, playerIndex: number) {
-    const [slot] = await db
-      .select()
-      .from(slots)
-      .where(and(eq(slots.userId, userId), eq(slots.playerIndex, playerIndex)));
-    return slot;
+  // -------- WALLET (single shared balance) --------
+  async getWalletBalance(userId: number): Promise<number> {
+    const [u] = await db
+      .select({ b: users.walletBalance })
+      .from(users)
+      .where(eq(users.id, userId));
+    return u?.b ?? 0;
   }
 
-  async ensureSlots(userId: number) {
-    const existing = await db.select().from(slots).where(eq(slots.userId, userId));
-    if (existing.length < SLOT_COUNT) {
-      const needed = Array.from({ length: SLOT_COUNT }, (_, i) => i).filter(
-        (i) => !existing.some((s) => s.playerIndex === i),
-      );
-      for (const playerIndex of needed) {
-        await db.insert(slots).values({ userId, playerIndex, balance: 0 });
-      }
+  async setWalletBalance(userId: number, balance: number): Promise<number> {
+    const safe = Math.max(0, Math.floor(balance));
+    const [u] = await db
+      .update(users)
+      .set({ walletBalance: safe })
+      .where(eq(users.id, userId))
+      .returning({ b: users.walletBalance });
+    return u?.b ?? 0;
+  }
+
+  /** Atomic credit/debit. Returns new balance, or null if insufficient funds. */
+  async adjustWalletBalance(userId: number, delta: number): Promise<number | null> {
+    if (delta >= 0) {
+      const [u] = await db
+        .update(users)
+        .set({ walletBalance: sql`${users.walletBalance} + ${delta}` })
+        .where(eq(users.id, userId))
+        .returning({ b: users.walletBalance });
+      return u?.b ?? null;
     }
-  }
-
-  async updateSlotBalance(userId: number, playerIndex: number, balance: number) {
-    await db
-      .update(slots)
-      .set({ balance })
-      .where(and(eq(slots.userId, userId), eq(slots.playerIndex, playerIndex)));
-  }
-
-  async getUserSlots(userId: number) {
-    return await db
-      .select()
-      .from(slots)
-      .where(eq(slots.userId, userId))
-      .orderBy(slots.playerIndex);
-  }
-
-  /** Total balance across all slots for a user, in cents. */
-  async getUserTotalBalance(userId: number): Promise<number> {
-    const userSlots = await this.getUserSlots(userId);
-    return userSlots.reduce((sum, s) => sum + (s.balance ?? 0), 0);
+    // Debit guarded by wallet_balance >= |delta|
+    const need = -delta;
+    const [u] = await db
+      .update(users)
+      .set({ walletBalance: sql`${users.walletBalance} - ${need}` })
+      .where(and(eq(users.id, userId), gte(users.walletBalance, need)))
+      .returning({ b: users.walletBalance });
+    return u ? u.b : null;
   }
 
   // -------- ADMIN BOOTSTRAP --------
-  async createAdminIfNotExists(passwordHash: string): Promise<void> {
-    const [existingAdmin] = await db
-      .select()
-      .from(users)
-      .where(eq(users.username, "admin"));
-    if (!existingAdmin) {
-      await db.insert(users).values({
-        username: "admin",
-        password: passwordHash,
-        isAdmin: 1,
-      });
+  async upsertAdminByPhone(
+    phone: string,
+    passwordHash: string,
+    username: string,
+  ): Promise<void> {
+    const existing = await this.getUserByPhone(phone);
+    if (existing) {
+      await db
+        .update(users)
+        .set({ password: passwordHash, isAdmin: 1, username })
+        .where(eq(users.id, existing.id));
+      return;
     }
+    await db.insert(users).values({
+      phone,
+      username,
+      password: passwordHash,
+      isAdmin: 1,
+    });
   }
 
   // -------- ROUNDS --------
@@ -179,11 +168,15 @@ export class DatabaseStorage {
     return round;
   }
 
-  async updateRoundStatus(id: number, status: string, endTime?: Date): Promise<Round> {
+  async updateRoundStatus(
+    id: number,
+    status: string,
+    endTime?: Date,
+  ): Promise<Round> {
     const endTimeMs = endTime ? endTime.getTime() : undefined;
     const [round] = await db
       .update(rounds)
-      .set({ status, endTime: endTimeMs })
+      .set({ status, ...(endTimeMs ? { endTime: endTimeMs } : {}) })
       .where(eq(rounds.id, id))
       .returning();
     return round;
@@ -243,13 +236,19 @@ export class DatabaseStorage {
   ): Promise<Bet> {
     const [bet] = await db
       .update(bets)
-      .set({ status, cashoutMultiplier, winAmount })
+      .set({
+        status,
+        ...(cashoutMultiplier !== undefined ? { cashoutMultiplier } : {}),
+        ...(winAmount !== undefined ? { winAmount } : {}),
+      })
       .where(eq(bets.id, id))
       .returning();
     return bet;
   }
 
-  async getActiveBets(roundId: number): Promise<(Bet & { user: Omit<User, "password"> })[]> {
+  async getActiveBets(
+    roundId: number,
+  ): Promise<(Bet & { user: Omit<User, "password"> })[]> {
     const activeBets = await db
       .select({ bet: bets, user: users })
       .from(bets)
@@ -302,11 +301,21 @@ export class DatabaseStorage {
     return tx;
   }
 
-  async getTransactionByMegapayId(megapayTransactionId: string): Promise<Transaction | undefined> {
+  async getTransactionByMegapayId(
+    megapayTransactionId: string,
+  ): Promise<Transaction | undefined> {
     const [tx] = await db
       .select()
       .from(transactions)
       .where(eq(transactions.megapayTransactionId, megapayTransactionId));
+    return tx;
+  }
+
+  async getTransaction(id: number): Promise<Transaction | undefined> {
+    const [tx] = await db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, id));
     return tx;
   }
 
@@ -331,7 +340,15 @@ export class DatabaseStorage {
       .limit(limit);
   }
 
-  /** Sum of completed withdrawals (and pending) within last 24h, cents. */
+  async getAllTransactions(limit = 200): Promise<Transaction[]> {
+    return await db
+      .select()
+      .from(transactions)
+      .orderBy(desc(transactions.id))
+      .limit(limit);
+  }
+
+  /** Sum of completed/pending withdrawals within last 24h, cents. */
   async getDailyWithdrawnAmount(userId: number): Promise<number> {
     const since = Date.now() - 24 * 60 * 60 * 1000;
     const rows = await db
@@ -344,9 +361,7 @@ export class DatabaseStorage {
           gte(transactions.createdAt, since),
         ),
       );
-    return rows
-      .filter((r: any) => r.amount != null)
-      .reduce((sum, r: any) => sum + (r.amount ?? 0), 0);
+    return rows.reduce((sum, r: any) => sum + (r.amount ?? 0), 0);
   }
 
   async getPendingWithdrawals(userId: number): Promise<Transaction[]> {
@@ -376,7 +391,6 @@ export class DatabaseStorage {
   }
 
   // -------- WEBHOOK LOG --------
-  /** Returns true if newly inserted (not a duplicate). */
   async recordWebhook(
     provider: string,
     transactionId: string,
@@ -385,8 +399,7 @@ export class DatabaseStorage {
     try {
       await db.insert(webhookLog).values({ provider, transactionId, payload });
       return true;
-    } catch (err: any) {
-      // Unique-constraint violation = duplicate (idempotent skip)
+    } catch {
       return false;
     }
   }
@@ -408,6 +421,14 @@ export class DatabaseStorage {
       deviceFp: input.deviceFp,
       details: input.details ? JSON.stringify(input.details) : null,
     });
+  }
+
+  async getRecentFraudEvents(limit = 100) {
+    return await db
+      .select()
+      .from(fraudEvents)
+      .orderBy(desc(fraudEvents.id))
+      .limit(limit);
   }
 
   async countAccountsByIp(ip: string): Promise<number> {

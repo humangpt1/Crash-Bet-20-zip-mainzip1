@@ -17,15 +17,15 @@ interface NextBet {
 
 /**
  * House edge configuration for the crash curve.
- * Tuned so the house wins decisively over time while keeping rounds fun:
- *   - HOUSE_EDGE 0.18 = 18% theoretical edge (player EV ≈ 0.82 per unit wagered).
- *   - INSTANT_BUST_CHANCE 0.10 = ~1 in 10 rounds bust at 1.00x.
- * The math still uses the standard provably-fair formula —
+ * Tuned heavily in the house's favour:
+ *   - HOUSE_EDGE 0.50  → player long-run EV ≈ 50% of stake.
+ *   - INSTANT_BUST_CHANCE 0.35 → ~1 in 3 rounds bust at 1.00x.
+ * The provably-fair HMAC formula stays intact —
  *   crash = (1 - residualEdge) / (1 - v)
- * — so distribution shape is preserved, just shifted toward the house.
+ * — only the constants are biased.
  */
-const HOUSE_EDGE = 0.18;
-const INSTANT_BUST_CHANCE = 0.10;
+const HOUSE_EDGE = 0.5;
+const INSTANT_BUST_CHANCE = 0.35;
 
 export class GameEngine {
   private wss: WebSocketServer;
@@ -116,15 +116,7 @@ export class GameEngine {
   }
 
   // ────────────────────────────────────────────────
-  // Provably-fair crash point with sustainable house edge.
-  //
-  // Formula (industry standard, verifiable):
-  //   1. Draw u ∈ [0,1) from HMAC-SHA256(serverSeed, clientSeed:nonce).
-  //   2. With probability HOUSE_EDGE → bust at 1.00x.
-  //   3. Otherwise crash = (1 - HOUSE_EDGE) / (1 - u), clamped to [1.00, 1000].
-  //
-  // This yields a player EV of (1 - HOUSE_EDGE) per unit wagered when chasing
-  // any cashout multiplier — the same edge across all strategies.
+  // Provably-fair crash point
   // ────────────────────────────────────────────────
   private generateCrashPoint(): number {
     this.serverSeed = crypto.randomBytes(32).toString("hex");
@@ -138,27 +130,20 @@ export class GameEngine {
     hmac.update(`${this.clientSeed}:${this.nonce}`);
     const hash = hmac.digest("hex");
 
-    // 52-bit float in [0,1)
     const h = parseInt(hash.slice(0, 13), 16);
     const u = h / Math.pow(2, 52);
 
-    // Instant-bust band (the house-edge slice)
     if (u < INSTANT_BUST_CHANCE) {
       return 1.0;
     }
 
-    // Renormalise the remaining range so the rest of the distribution covers
-    // [INSTANT_BUST_CHANCE, 1) with the standard 1/(1-x) curve.
     const v = (u - INSTANT_BUST_CHANCE) / (1 - INSTANT_BUST_CHANCE);
-
-    // Apply the residual edge so player EV per round = 1 - HOUSE_EDGE.
     const residualEdge =
       (HOUSE_EDGE - INSTANT_BUST_CHANCE) / (1 - INSTANT_BUST_CHANCE);
     const fairFactor = Math.max(0, 1 - residualEdge);
 
     let crashPoint = fairFactor / (1 - v);
 
-    // Hard cap 1000x for safety
     if (!isFinite(crashPoint) || crashPoint > 1000) crashPoint = 1000;
     if (crashPoint < 1.0) crashPoint = 1.0;
 
@@ -286,7 +271,6 @@ export class GameEngine {
       );
 
       const activeBets = await storage.getActiveBets(this.currentRoundId);
-
       await Promise.all(
         activeBets
           .filter((b) => b.status === "active")
@@ -306,7 +290,7 @@ export class GameEngine {
   }
 
   // ────────────────────────────────────────────────
-  // Place Bet
+  // Place Bet — debits from the shared wallet balance.
   // ────────────────────────────────────────────────
   public async placeBet(
     userId: number,
@@ -315,12 +299,8 @@ export class GameEngine {
     autoCashout?: number | null,
     saveNextBet: boolean = false,
   ) {
-    if (!this.currentRoundId) {
-      throw new Error("No active round available");
-    }
-    if (playerIndex < 0 || playerIndex > 1) {
-      throw new Error("Slot must be 1 or 2");
-    }
+    if (!this.currentRoundId) throw new Error("No active round available");
+    if (playerIndex < 0 || playerIndex > 1) throw new Error("Slot must be 1 or 2");
 
     if (!saveNextBet && this.status !== "betting") {
       throw new Error(
@@ -328,22 +308,11 @@ export class GameEngine {
       );
     }
 
-    const userSlots = await storage.getUserSlots(userId);
-    const slot = userSlots[playerIndex];
-
-    if (!slot) {
-      throw new Error(`Slot ${playerIndex + 1} not found`);
-    }
-
-    const slotBalance = slot.balance ?? 0;
-    if (slotBalance < amount) {
+    const newBalance = await storage.adjustWalletBalance(userId, -amount);
+    if (newBalance === null) {
       throw new Error("Insufficient balance");
     }
 
-    const newBalance = slotBalance - amount;
-    await storage.updateSlotBalance(userId, playerIndex, newBalance);
-
-    // Track wagering for withdrawal eligibility
     await storage.incrementUserWagered(userId, amount);
 
     const bet = await storage.placeBet(
@@ -355,7 +324,7 @@ export class GameEngine {
     );
 
     this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
-      slots: await storage.getUserSlots(userId),
+      walletBalance: newBalance,
     });
 
     this.broadcast(wsEvents.SERVER_BET_PLACED, {
@@ -381,19 +350,15 @@ export class GameEngine {
   }
 
   // ────────────────────────────────────────────────
-  // Cashout Bet
+  // Cashout — credits the shared wallet balance.
   // ────────────────────────────────────────────────
   public async handleCashout(
     userId: number,
     cashoutValue?: number,
     playerIndex: number = 0,
   ): Promise<number> {
-    if (this.status !== "active") {
-      throw new Error("Round is not active");
-    }
-    if (!this.currentRoundId) {
-      throw new Error("No active round");
-    }
+    if (this.status !== "active") throw new Error("Round is not active");
+    if (!this.currentRoundId) throw new Error("No active round");
 
     const activeBets = await storage.getActiveBets(this.currentRoundId);
     const bet = activeBets.find(
@@ -403,12 +368,9 @@ export class GameEngine {
         b.playerIndex === playerIndex,
     );
 
-    if (!bet) {
-      throw new Error("No active bet found for this slot");
-    }
+    if (!bet) throw new Error("No active bet found for this slot");
 
     const cashoutMultiplier = cashoutValue ?? this.multiplier;
-
     if (cashoutMultiplier > this.crashPoint + 0.001) {
       throw new Error("Cashout value exceeds crash point");
     }
@@ -416,19 +378,11 @@ export class GameEngine {
     const winAmount = Math.floor(bet.amount * cashoutMultiplier);
 
     await storage.updateBetStatus(bet.id, "won", cashoutMultiplier, winAmount);
+    const newBalance = await storage.adjustWalletBalance(userId, winAmount);
 
-    const slot = await storage.getSlot(userId, playerIndex);
-    if (slot) {
-      await storage.updateSlotBalance(
-        userId,
-        playerIndex,
-        slot.balance + winAmount,
-      );
-
-      this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
-        slots: await storage.getUserSlots(userId),
-      });
-    }
+    this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
+      walletBalance: newBalance ?? 0,
+    });
 
     this.broadcast(wsEvents.SERVER_BET_CASHED_OUT, {
       bet: {
@@ -450,9 +404,6 @@ export class GameEngine {
     return winAmount;
   }
 
-  // ────────────────────────────────────────────────
-  // State Helpers
-  // ────────────────────────────────────────────────
   private broadcastState(): void {
     this.broadcast(wsEvents.SERVER_STATE_UPDATE, this.getStatus());
   }

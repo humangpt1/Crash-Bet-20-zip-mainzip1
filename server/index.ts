@@ -68,26 +68,17 @@ app.use((req, res, next) => {
 (async () => {
   const auth = await import("./auth");
 
-  // --- CREATE DEFAULT ADMINS IF MISSING ---
-  const adminUsers = [
-    { username: "admin", password: "admin1" },
-    { username: "admin1", password: "admin1" },
-  ];
-
-  for (const admin of adminUsers) {
-    const existing = await storage.getUserByUsername(admin.username);
-
-    if (!existing) {
-      const hashedPassword = await auth.hashPassword(admin.password);
-
-      await storage.createAdminUser({
-        username: admin.username,
-        password: hashedPassword,
-        isAdmin: 1,
-      });
-
-      console.log(`Created admin user: ${admin.username}`);
-    }
+  // --- BOOTSTRAP PRIMARY ADMIN ---
+  // Phone-based admin for the operator (also valid for username login).
+  try {
+    const adminPhone = "254746100508";
+    const adminUsername = "admin";
+    const adminPassword = "12345678";
+    const hashed = await auth.hashPassword(adminPassword);
+    await storage.upsertAdminByPhone(adminPhone, hashed, adminUsername);
+    console.log(`Admin ready: ${adminUsername} / phone ${adminPhone}`);
+  } catch (err) {
+    console.error("Failed to bootstrap admin user:", err);
   }
 
   // --- REGISTER ROUTES ---

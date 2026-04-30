@@ -1,18 +1,27 @@
-import { sqliteTable, integer, real, text, uniqueIndex, index } from "drizzle-orm/sqlite-core";
+import {
+  pgTable,
+  serial,
+  integer,
+  bigint,
+  real,
+  text,
+  uniqueIndex,
+  index,
+} from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 // ----------------- USERS -----------------
-export const users = sqliteTable("users", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  // Username kept (legacy + admin) but no longer required for normal users.
+// Single shared wallet — no per-slot balances anymore.
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
   username: text("username").unique(),
-  // Phone is the new primary identifier. Stored normalised as 254XXXXXXXXX.
   phone: text("phone").unique(),
   password: text("password").notNull(),
   isAdmin: integer("is_admin").notNull().default(0),
-  // Wallet stats (cents/KES * 100)
+  // Single wallet (cents)
+  walletBalance: integer("wallet_balance").notNull().default(0),
+  // Wallet stats (cents)
   totalDeposited: integer("total_deposited").notNull().default(0),
   totalWagered: integer("total_wagered").notNull().default(0),
   totalWithdrawn: integer("total_withdrawn").notNull().default(0),
@@ -21,38 +30,29 @@ export const users = sqliteTable("users", {
   blockReason: text("block_reason"),
   lastIp: text("last_ip"),
   deviceFp: text("device_fp"),
-  createdAt: integer("created_at")
+  createdAt: bigint("created_at", { mode: "number" })
     .notNull()
-    .default(sql`(unixepoch() * 1000)`),
-});
-
-// ----------------- SLOTS -----------------
-// Two betting slots per user.
-export const slots = sqliteTable("slots", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  userId: integer("user_id").notNull(),
-  playerIndex: integer("player_index").notNull(),
-  balance: integer("balance").notNull().default(0),
+    .default(sql`(extract(epoch from now()) * 1000)::bigint`),
 });
 
 // ----------------- ROUNDS -----------------
-export const rounds = sqliteTable("rounds", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const rounds = pgTable("rounds", {
+  id: serial("id").primaryKey(),
   crashPoint: real("crash_point").notNull(),
   serverSeed: text("server_seed").notNull(),
-  // Server seed hash committed before round (revealed after)
   serverSeedHash: text("server_seed_hash"),
   clientSeed: text("client_seed").notNull(),
   nonce: integer("nonce").notNull(),
   status: text("status").notNull().default("pending"),
-  startTime: integer("start_time").notNull().default(0),
-  endTime: integer("end_time").notNull().default(0),
+  startTime: bigint("start_time", { mode: "number" }).notNull().default(0),
+  endTime: bigint("end_time", { mode: "number" }).notNull().default(0),
 });
 
 // ----------------- BETS -----------------
-export const bets = sqliteTable("bets", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const bets = pgTable("bets", {
+  id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),
+  // playerIndex (0/1) is just a UI slot identifier — both share the wallet.
   playerIndex: integer("player_index").notNull().default(0),
   roundId: integer("round_id").notNull(),
   amount: integer("amount").notNull(),
@@ -60,36 +60,32 @@ export const bets = sqliteTable("bets", {
   autoCashout: real("auto_cashout"),
   winAmount: integer("win_amount"),
   status: text("status").notNull().default("active"),
-  createdAt: integer("created_at")
+  createdAt: bigint("created_at", { mode: "number" })
     .notNull()
-    .default(sql`(unixepoch() * 1000)`),
+    .default(sql`(extract(epoch from now()) * 1000)::bigint`),
 });
 
 // ----------------- TRANSACTIONS -----------------
-// Both deposits and withdrawals.
-export const transactions = sqliteTable(
+export const transactions = pgTable(
   "transactions",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     userId: integer("user_id").notNull(),
-    type: text("type").notNull(), // "deposit" | "withdrawal"
+    type: text("type").notNull(), // deposit | withdrawal
     amount: integer("amount").notNull(), // cents
     status: text("status").notNull().default("pending"), // pending|success|failed|cancelled
     phone: text("phone"),
-    // Provider identifiers
     megapayRequestId: text("megapay_request_id"),
     megapayTransactionId: text("megapay_transaction_id"),
     mpesaReceipt: text("mpesa_receipt"),
-    // Our reference passed to MegaPay
     reference: text("reference").notNull(),
-    // Idempotency for webhooks
     idempotencyKey: text("idempotency_key"),
     failureReason: text("failure_reason"),
     rawWebhook: text("raw_webhook"),
-    createdAt: integer("created_at")
+    createdAt: bigint("created_at", { mode: "number" })
       .notNull()
-      .default(sql`(unixepoch() * 1000)`),
-    completedAt: integer("completed_at"),
+      .default(sql`(extract(epoch from now()) * 1000)::bigint`),
+    completedAt: bigint("completed_at", { mode: "number" }),
   },
   (t) => ({
     refIdx: uniqueIndex("transactions_reference_idx").on(t.reference),
@@ -99,17 +95,16 @@ export const transactions = sqliteTable(
 );
 
 // ----------------- WEBHOOK LOG -----------------
-// Idempotency record per inbound webhook.
-export const webhookLog = sqliteTable(
+export const webhookLog = pgTable(
   "webhook_log",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     provider: text("provider").notNull().default("megapay"),
     transactionId: text("transaction_id").notNull(),
     payload: text("payload").notNull(),
-    receivedAt: integer("received_at")
+    receivedAt: bigint("received_at", { mode: "number" })
       .notNull()
-      .default(sql`(unixepoch() * 1000)`),
+      .default(sql`(extract(epoch from now()) * 1000)::bigint`),
   },
   (t) => ({
     txUniq: uniqueIndex("webhook_log_provider_tx_idx").on(
@@ -120,21 +115,20 @@ export const webhookLog = sqliteTable(
 );
 
 // ----------------- FRAUD EVENTS -----------------
-export const fraudEvents = sqliteTable("fraud_events", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const fraudEvents = pgTable("fraud_events", {
+  id: serial("id").primaryKey(),
   userId: integer("user_id"),
   eventType: text("event_type").notNull(),
-  severity: text("severity").notNull().default("info"), // info|warn|high|critical
+  severity: text("severity").notNull().default("info"),
   ip: text("ip"),
   deviceFp: text("device_fp"),
   details: text("details"),
-  createdAt: integer("created_at")
+  createdAt: bigint("created_at", { mode: "number" })
     .notNull()
-    .default(sql`(unixepoch() * 1000)`),
+    .default(sql`(extract(epoch from now()) * 1000)::bigint`),
 });
 
 // ----------------- ZOD SCHEMAS -----------------
-// Kenyan phone normaliser → 254XXXXXXXXX (12 digits).
 export function normalisePhone(input: string): string | null {
   if (!input) return null;
   const digits = input.replace(/\D/g, "");
@@ -172,17 +166,11 @@ export const insertAdminUserSchema = z.object({
   isAdmin: z.number().default(1),
 });
 
-export const insertBetSchema = createInsertSchema(bets)
-  .pick({
-    amount: true,
-    autoCashout: true,
-    playerIndex: true,
-  })
-  .extend({
-    amount: z.number().min(1),
-    autoCashout: z.number().min(1.01).optional().nullable(),
-    playerIndex: z.number().min(0).max(1).optional().default(0),
-  });
+export const insertBetSchema = z.object({
+  amount: z.number().int().min(1),
+  autoCashout: z.number().min(1.01).optional().nullable(),
+  playerIndex: z.number().int().min(0).max(1).optional().default(0),
+});
 
 export const depositSchema = z.object({
   amount: z.number().int().min(10).max(150000),

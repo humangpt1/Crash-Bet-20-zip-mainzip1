@@ -38,3 +38,4 @@ externalPort = 80
 
 [userenv.shared]
 MEGAPAY_API_KEY = "MGPYxV1FsZKn"
+NEON_DATABASE_URL = "postgresql://neondb_owner:npg_DZ1uV5LHwlPe@ep-round-math-a9pfnsqv-pooler.gwc.azure.neon.tech/neondb?sslmode=require&channel_binding=require"
