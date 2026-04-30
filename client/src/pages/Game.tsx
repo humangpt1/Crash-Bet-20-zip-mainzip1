@@ -8,47 +8,29 @@ import { LiveBets } from "@/components/LiveBets";
 import { HistoryBar } from "@/components/HistoryBar";
 import { WalletModal } from "@/components/WalletModal";
 import { Button } from "@/components/ui/button";
-import { LogOut, User, Wallet, Plus } from "lucide-react";
+import { LogOut, User, ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
 
 function formatKsh(amount: number) {
   return Math.floor(amount).toLocaleString("en-KE");
 }
 
+type WalletTab = "deposit" | "withdraw" | "history";
+
 export default function GamePage() {
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
   const [walletOpen, setWalletOpen] = useState(false);
+  const [walletTab, setWalletTab] = useState<WalletTab>("deposit");
 
-  const {
-    gameState,
-    activeBets,
-    history,
-    myBets,
-    placeBet,
-    cashout,
-    slotBalances: updatedSlotBalances,
-  } = useGame();
+  const { gameState, activeBets, history, myBets, placeBet, cashout, walletBalance } =
+    useGame();
 
   const [placingSlots, setPlacingSlots] = useState<Record<number, boolean>>({});
   const [cashingSlots, setCashingSlots] = useState<Record<number, boolean>>({});
-  const [slotBalances, setSlotBalances] = useState<Record<number, number>>({
-    0: 0,
-    1: 0,
-  });
 
   useEffect(() => {
     if (!user) setLocation("/auth");
   }, [user, setLocation]);
-
-  // Sync slot balances from server (2 slots)
-  useEffect(() => {
-    if (updatedSlotBalances) {
-      setSlotBalances({
-        0: updatedSlotBalances[0] ?? 0,
-        1: updatedSlotBalances[1] ?? 0,
-      });
-    }
-  }, [updatedSlotBalances]);
 
   const handlePlaceBet = async (
     amount: number,
@@ -74,34 +56,52 @@ export default function GamePage() {
     }
   };
 
-  const totalBalance = (slotBalances[0] ?? 0) + (slotBalances[1] ?? 0);
+  const openWallet = (tab: WalletTab) => {
+    setWalletTab(tab);
+    setWalletOpen(true);
+  };
+
   const displayName = user?.phone || user?.username || "Player";
 
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="h-16 border-b border-border/50 bg-card/50 backdrop-blur-md sticky top-0 z-40 flex items-center justify-between px-4 lg:px-8">
-        <div className="flex items-center gap-4">
-          <h1 className="text-2xl font-black tracking-tighter text-primary text-glow">
+      <header className="h-16 border-b border-border/50 bg-card/50 backdrop-blur-md sticky top-0 z-40 flex items-center justify-between px-3 sm:px-4 lg:px-8 gap-2">
+        <div className="flex items-center gap-3 min-w-0">
+          <h1 className="text-xl sm:text-2xl font-black tracking-tighter text-primary text-glow truncate">
             CRASH<span className="text-foreground">.BET</span>
           </h1>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="hidden md:flex items-center gap-2 bg-background/50 px-3 py-2 rounded-full border border-white/5">
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Wallet pill (read-only summary) */}
+          <div className="hidden sm:flex items-center gap-2 bg-background/50 px-3 py-2 rounded-full border border-white/5">
             <User className="w-4 h-4 text-muted-foreground" />
             <span className="font-mono text-xs">{displayName}</span>
           </div>
 
-          <button
-            onClick={() => setWalletOpen(true)}
-            className="flex items-center gap-2 bg-success/10 text-success px-4 py-2 rounded-full border border-success/20 box-glow-success hover:bg-success/20 transition-colors"
-          >
-            <Wallet className="w-4 h-4" />
-            <span className="font-mono font-bold text-sm">
-              {formatKsh(totalBalance / 100)} KSH
+          <div className="flex items-center gap-1.5">
+            <span className="hidden sm:inline font-mono font-bold text-sm text-success">
+              KES {formatKsh(walletBalance / 100)}
             </span>
-            <Plus className="w-3.5 h-3.5" />
-          </button>
+
+            <button
+              onClick={() => openWallet("deposit")}
+              className="flex items-center gap-1 bg-success/90 hover:bg-success text-black font-semibold text-xs sm:text-sm px-3 py-2 rounded-full shadow-md shadow-success/30 active:scale-95 transition"
+              data-testid="button-deposit-header"
+            >
+              <ArrowDownToLine className="w-4 h-4" />
+              <span className="hidden xs:inline sm:inline">Deposit</span>
+            </button>
+
+            <button
+              onClick={() => openWallet("withdraw")}
+              className="flex items-center gap-1 bg-red-500/90 hover:bg-red-500 text-white font-semibold text-xs sm:text-sm px-3 py-2 rounded-full shadow-md shadow-red-500/30 active:scale-95 transition"
+              data-testid="button-withdraw-header"
+            >
+              <ArrowUpFromLine className="w-4 h-4" />
+              <span className="hidden xs:inline sm:inline">Withdraw</span>
+            </button>
+          </div>
 
           <Button
             variant="ghost"
@@ -114,13 +114,21 @@ export default function GamePage() {
         </div>
       </header>
 
-      <main className="flex-1 p-4 lg:p-8 max-w-[1600px] mx-auto w-full flex flex-col gap-6">
+      {/* Mobile: balance bar under header */}
+      <div className="sm:hidden flex items-center justify-between px-4 py-2 bg-card/40 border-b border-white/5">
+        <span className="text-xs text-muted-foreground">{displayName}</span>
+        <span className="font-mono font-bold text-sm text-success">
+          KES {formatKsh(walletBalance / 100)}
+        </span>
+      </div>
+
+      <main className="flex-1 p-3 sm:p-4 lg:p-8 max-w-[1600px] mx-auto w-full flex flex-col gap-4 sm:gap-6">
         <div className="w-full bg-card/30 p-2 rounded-xl border border-white/5">
           <HistoryBar history={history} />
         </div>
 
-        <div className="flex flex-col lg:flex-row gap-6 h-full min-h-[600px]">
-          <div className="flex-1 flex flex-col gap-6">
+        <div className="flex flex-col lg:flex-row gap-4 sm:gap-6 h-full min-h-[600px]">
+          <div className="flex-1 flex flex-col gap-4 sm:gap-6">
             <div className="w-full">
               <GameCanvas gameState={gameState} />
             </div>
@@ -135,7 +143,7 @@ export default function GamePage() {
                 cashingSlots={cashingSlots}
                 setPlacingSlots={setPlacingSlots}
                 setCashingSlots={setCashingSlots}
-                slotBalances={slotBalances}
+                walletBalance={walletBalance}
               />
             </div>
           </div>
@@ -146,7 +154,11 @@ export default function GamePage() {
         </div>
       </main>
 
-      <WalletModal open={walletOpen} onClose={() => setWalletOpen(false)} />
+      <WalletModal
+        open={walletOpen}
+        onClose={() => setWalletOpen(false)}
+        initialTab={walletTab}
+      />
     </div>
   );
 }

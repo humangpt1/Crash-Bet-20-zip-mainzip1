@@ -1,24 +1,31 @@
 # CRASH.BET
 
-Aviator-style crash betting web app for the Kenyan market with real M-Pesa deposits via MegaPay, internal-queue withdrawals, and a provably-fair RNG with a 5% house edge.
+Aviator-style crash betting web app for the Kenyan market with real M-Pesa deposits via MegaPay, simulated auto-settling withdrawals, and a heavily house-favoured provably-fair RNG.
 
 ## Stack
 
 - **Backend**: Node 20, Express 5, TypeScript (`tsx`), `ws` for WebSockets, Passport (local strategy), express-session + memorystore.
-- **Database**: SQLite via `better-sqlite3` + Drizzle ORM. File: `./db.sqlite`.
+- **Database**: **Neon Postgres** via `pg` + Drizzle ORM (`drizzle-orm/node-postgres`). Connection string read from `NEON_DATABASE_URL` (falls back to `DATABASE_URL` if unset).
 - **Frontend**: React 18 + Vite 7 + TanStack Query + wouter + Tailwind 3 + Radix UI + lucide-react.
-- **Payments**: MegaPay STK Push (`https://megapay.co.ke/backend/v1/initiatestk`).
+- **Payments**: MegaPay STK Push for deposits (`https://megapay.co.ke/backend/v1/initiatestk`); withdrawals are auto-settled in-app.
 
 ## Currency
 
 All money in the database is stored as **integer cents** (1 KES = 100 cents). The frontend shows whole KES.
 
+## Wallet model
+
+**Single shared wallet per user** (`users.wallet_balance`). The two on-screen "slots" both draw from and credit back to the same pool. Atomic debit is guarded by a `wallet_balance >= amount` `WHERE` clause to prevent overdraw under concurrency.
+
 ## Auth
 
 Phone (M-Pesa) + password. Phone is normalised to `254XXXXXXXXX`.
-Admins still log in with `username` (legacy).
+Admins can log in with phone OR username.
 
-Default admins (created on first boot): `admin / admin1` and `admin1 / admin1`.
+Bootstrap admin (created/refreshed on every boot):
+- **Username**: `admin`
+- **Phone**: `0746100508` (`254746100508`)
+- **Password**: `12345678`
 
 ## Wallet rules
 
@@ -31,6 +38,7 @@ Default admins (created on first boot): `admin / admin1` and `admin1 / admin1`.
 | Daily withdrawal limit | KES 70 000 / 24 h |
 | Wagering requirement | 2 × `total_deposited` before any withdrawal |
 | Concurrent pending withdrawals | max 2 |
+| Withdrawal auto-settle delay | 8 s (then status flips to `success` with a generated M-Pesa receipt) |
 
 ## Game (provably fair)
 

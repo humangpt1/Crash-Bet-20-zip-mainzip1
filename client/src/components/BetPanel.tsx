@@ -28,7 +28,7 @@ interface BetPanelProps {
   setCashingSlots: React.Dispatch<
     React.SetStateAction<Record<number, boolean>>
   >;
-  slotBalances: Record<number, number>;
+  walletBalance: number;
 }
 
 export function BetPanel(props: BetPanelProps) {
@@ -50,7 +50,7 @@ function BetSlot({
   cashingSlots,
   setPlacingSlots,
   setCashingSlots,
-  slotBalances,
+  walletBalance,
 }: BetPanelProps & { index: number }) {
   const { toast } = useToast();
   const MIN_BET = 10;
@@ -66,8 +66,8 @@ function BetSlot({
   // New: track queued bets per slot (optimistic + persistent across phases)
   const [queuedBets, setQueuedBets] = useState<Record<number, boolean>>({});
 
-  // balance is in cents (server side); amountInput is whole KES typed by user.
-  const balance = slotBalances[index] ?? 0;
+  // Single shared wallet (cents). Both slots draw from the same pool.
+  const balance = walletBalance ?? 0;
   const balanceKsh = Math.floor(balance / 100);
   const placing = placingSlots[index] ?? false;
   const cashing = cashingSlots[index] ?? false;
@@ -289,7 +289,7 @@ function BetSlot({
   return (
     <div className="bg-card rounded-xl p-4 border border-border shadow-lg flex flex-col gap-3 relative overflow-hidden">
       <div className="absolute top-2 right-2 text-xs font-bold">
-        Slot {index + 1} •{" "}
+        Slot {index + 1} • Wallet{" "}
         <span
           className={
             balance > 0 ? "text-green-400 font-medium" : "text-muted-foreground"
