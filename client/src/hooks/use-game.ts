@@ -149,8 +149,15 @@ export function useGame() {
 
             case wsEvents.SERVER_BET_PLACED:
               setVisibleBets((prev) => {
+                // Only collapse the SAME user's prior bet on the SAME slot —
+                // every other player's bets must remain visible so the
+                // live-bets feed actually shows the room's activity.
                 const filtered = prev.filter(
-                  (b) => b.playerIndex !== payload.bet?.playerIndex,
+                  (b) =>
+                    !(
+                      b.playerIndex === payload.bet?.playerIndex &&
+                      b.user?.id === payload.user?.id
+                    ),
                 );
                 return [...filtered, payload].sort(
                   (a, b) => (b.bet.amount ?? 0) - (a.bet.amount ?? 0),

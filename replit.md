@@ -17,6 +17,21 @@ All money in the database is stored as **integer cents** (1 KES = 100 cents). Th
 
 **Single shared wallet per user** (`users.wallet_balance`). The two on-screen "slots" both draw from and credit back to the same pool. Atomic debit is guarded by a `wallet_balance >= amount` `WHERE` clause to prevent overdraw under concurrency.
 
+### Welcome bonus
+
+Every newly registered account is credited with **KES 50** (5 000 cents) immediately after `/api/register`. The bonus lands in `wallet_balance` only — `total_deposited` stays at `0`, so the existing "deposit before withdrawing" rule keeps the bonus locked as play-money until the user makes a real M-Pesa top-up.
+
+## Live-bets simulator (fake players)
+
+The live-bets feed is seeded with synthetic players so the room never looks empty.
+
+- A pool of 80 fake users is built at boot (negative `id`s, randomised Kenyan-formatted phones).
+- Every betting window seeds 22–31 fake bets, dripped over the 5-second window with random delays.
+- Bets range KES 10 – 10 000, weighted toward the lower end. ~65 % carry an auto-cashout (1.20x – 6.00x); the rest ride bare.
+- Auto-cashouts fire in real time as the multiplier climbs (broadcast as normal `bet_cashed_out` events).
+- All public broadcasts include a **masked phone** as `user.username` (e.g. `0712****78`) — fake or real, it never leaks the full number.
+- As soon as ≥ 20 distinct **real** players have placed a bet in the current round, every still-pending fake bet is cancelled and no new fakes are broadcast for that round.
+
 ## Auth
 
 Phone (M-Pesa) + password. Phone is normalised to `254XXXXXXXXX`.
