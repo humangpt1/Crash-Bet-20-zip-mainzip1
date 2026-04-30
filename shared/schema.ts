@@ -139,6 +139,20 @@ export function normalisePhone(input: string): string | null {
   return null;
 }
 
+/**
+ * Mask a phone number for public display.
+ * "254712345678" or "0712345678" → "0712****78"
+ * Keeps first 4 and last 2 digits, masks middle with asterisks.
+ */
+export function maskPhone(input: string | null | undefined): string {
+  if (!input) return "Anon";
+  const digits = input.replace(/\D/g, "");
+  let local = digits;
+  if (digits.startsWith("254") && digits.length === 12) local = "0" + digits.slice(3);
+  if (local.length < 6) return local || "Anon";
+  return local.slice(0, 4) + "*".repeat(local.length - 6) + local.slice(-2);
+}
+
 export const phoneSchema = z
   .string()
   .min(9)

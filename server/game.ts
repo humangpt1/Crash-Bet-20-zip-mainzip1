@@ -2,6 +2,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { Server } from "http";
 import { storage } from "./storage";
 import { wsEvents } from "@shared/routes";
+import { maskPhone } from "@shared/schema";
 import crypto from "crypto";
 
 interface Client extends WebSocket {
@@ -14,6 +15,30 @@ interface NextBet {
   amount: number;
   autoCashout?: number | null;
 }
+
+interface FakeUser {
+  id: number; // negative, never collides with real user ids
+  masked: string; // e.g. "0712****78"
+}
+
+interface FakeBet {
+  betId: number; // negative, never collides with real bet ids
+  userId: number;
+  masked: string;
+  playerIndex: number;
+  amount: number; // cents
+  autoCashout: number | null;
+  status: "active" | "won";
+  cashedOut: boolean;
+  createdAt: number;
+}
+
+/**
+ * Once at least this many DISTINCT real players have placed a bet in the
+ * current round, we stop broadcasting any further fake bets — the room is
+ * lively enough on its own.
+ */
+const REAL_BETTOR_THRESHOLD = 20;
 
 /**
  * House edge configuration for the crash curve.
@@ -44,10 +69,156 @@ export class GameEngine {
   private nonce = 0;
   private nextBets: Record<number, Record<number, NextBet>> = {};
 
+  // ── Fake-player simulator state ─────────────────────────────
+  private fakePool: FakeUser[] = [];
+  private fakeBetSeq = 0;
+  private currentRoundFakeBets = new Map<number, FakeBet>();
+  private fakeTimers: NodeJS.Timeout[] = [];
+  private realBettorsThisRound = new Set<number>();
+  private userMaskCache = new Map<number, string>();
+
   constructor(server: Server) {
     this.wss = new WebSocketServer({ server, path: "/ws" });
+    this.buildFakePool();
     this.setupWebSocket();
     this.startNewRound();
+  }
+
+  // ────────────────────────────────────────────────
+  // Fake-player simulator
+  // ────────────────────────────────────────────────
+  private buildFakePool(size = 80) {
+    const prefixes = ["070", "071", "072", "074", "079", "0110", "0111"];
+    this.fakePool = [];
+    for (let i = 0; i < size; i++) {
+      const p = prefixes[Math.floor(Math.random() * prefixes.length)];
+      let n = "";
+      for (let k = 0; k < 10 - p.length; k++) n += Math.floor(Math.random() * 10);
+      const phone = p + n;
+      this.fakePool.push({
+        id: -(1000 + i),
+        masked: maskPhone(phone),
+      });
+    }
+  }
+
+  private cancelFakeTimers() {
+    this.fakeTimers.forEach((t) => clearTimeout(t));
+    this.fakeTimers = [];
+  }
+
+  /**
+   * During the 5-second betting window, drip 22-31 fake bets onto the wire so
+   * the live-bets feed always feels busy. Each scheduled bet checks the real
+   * bettor count just before broadcasting and self-cancels if real activity
+   * has already passed the threshold.
+   */
+  private seedFakeBets(roundId: number) {
+    this.cancelFakeTimers();
+    this.currentRoundFakeBets.clear();
+
+    const target = 22 + Math.floor(Math.random() * 10); // 22..31
+    const pool = [...this.fakePool]
+      .sort(() => Math.random() - 0.5)
+      .slice(0, target);
+
+    pool.forEach((fp) => {
+      const delay = 150 + Math.floor(Math.random() * 4500); // 0.15s .. 4.65s into 5s window
+      const t = setTimeout(() => {
+        if (this.currentRoundId !== roundId) return;
+        if (this.realBettorsThisRound.size >= REAL_BETTOR_THRESHOLD) return;
+        if (this.status !== "betting") return;
+        this.placeFakeBet(fp, roundId);
+      }, delay);
+      this.fakeTimers.push(t);
+    });
+  }
+
+  private placeFakeBet(fp: FakeUser, roundId: number) {
+    // Bet between 10 KES and 10 000 KES, weighted toward the lower end.
+    const r = Math.random();
+    const kesAmount = Math.floor(10 + Math.pow(r, 2.2) * 9990);
+    const amountCents = kesAmount * 100;
+    const playerIndex = Math.random() < 0.5 ? 0 : 1;
+
+    // 65% set an auto-cashout (1.20x..6.00x). Rest ride it bare.
+    let autoCashout: number | null = null;
+    if (Math.random() < 0.65) {
+      autoCashout = +(1.2 + Math.random() * 4.8).toFixed(2);
+    }
+
+    const betId = -(++this.fakeBetSeq);
+    const fb: FakeBet = {
+      betId,
+      userId: fp.id,
+      masked: fp.masked,
+      playerIndex,
+      amount: amountCents,
+      autoCashout,
+      status: "active",
+      cashedOut: false,
+      createdAt: Date.now(),
+    };
+    this.currentRoundFakeBets.set(betId, fb);
+
+    this.broadcast(wsEvents.SERVER_BET_PLACED, {
+      bet: {
+        id: betId,
+        roundId,
+        userId: fp.id,
+        playerIndex,
+        amount: amountCents,
+        autoCashout,
+        status: "active",
+        createdAt: fb.createdAt,
+      },
+      user: { id: fp.id, username: fp.masked },
+    });
+  }
+
+  private simulateFakeCashouts() {
+    if (this.status !== "active" || !this.currentRoundId) return;
+    const m = this.multiplier;
+    this.currentRoundFakeBets.forEach((fb) => {
+      if (fb.cashedOut || fb.status !== "active") return;
+      if (
+        fb.autoCashout &&
+        m >= fb.autoCashout &&
+        m < this.crashPoint
+      ) {
+        fb.cashedOut = true;
+        fb.status = "won";
+        const winAmount = Math.floor(fb.amount * fb.autoCashout);
+        this.broadcast(wsEvents.SERVER_BET_CASHED_OUT, {
+          bet: {
+            id: fb.betId,
+            roundId: this.currentRoundId,
+            userId: fb.userId,
+            playerIndex: fb.playerIndex,
+            amount: fb.amount,
+            autoCashout: fb.autoCashout,
+            status: "won",
+            cashoutMultiplier: fb.autoCashout,
+            winAmount,
+            createdAt: fb.createdAt,
+          },
+          user: { id: fb.userId, username: fb.masked },
+          timestamp: Date.now(),
+        });
+      }
+    });
+  }
+
+  /**
+   * Look up the masked display name for a real user, with in-memory caching.
+   */
+  private async getMaskedForUser(userId: number): Promise<string> {
+    const cached = this.userMaskCache.get(userId);
+    if (cached) return cached;
+    const u = await storage.getUser(userId);
+    const masked = maskPhone(u?.phone) || u?.username || `Player ${userId}`;
+    this.userMaskCache.set(userId, masked);
+    return masked;
   }
 
   // ────────────────────────────────────────────────
@@ -169,12 +340,15 @@ export class GameEngine {
       );
 
       this.currentRoundId = round.id;
+      this.realBettorsThisRound.clear();
 
       this.broadcast(wsEvents.SERVER_ROUND_START, {
         roundId: this.currentRoundId,
         serverSeedHash: this.serverSeedHash,
         ...this.getStatus(),
       });
+
+      this.seedFakeBets(this.currentRoundId);
 
       this.bettingTimeout = setTimeout(() => this.startGame(), 5000);
     } catch (error) {
@@ -238,6 +412,9 @@ export class GameEngine {
     }
 
     if (!this.currentRoundId) return;
+
+    // Trigger fake-player auto-cashouts as the multiplier climbs.
+    this.simulateFakeCashouts();
 
     const activeBets = await storage.getActiveBets(this.currentRoundId);
 
@@ -323,6 +500,9 @@ export class GameEngine {
       autoCashout,
     );
 
+    this.realBettorsThisRound.add(userId);
+    const masked = await this.getMaskedForUser(userId);
+
     this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
       walletBalance: newBalance,
     });
@@ -338,7 +518,7 @@ export class GameEngine {
         status: bet.status,
         createdAt: bet.createdAt ?? Date.now(),
       },
-      user: { id: userId },
+      user: { id: userId, username: masked },
     });
 
     if (saveNextBet) {
@@ -379,6 +559,7 @@ export class GameEngine {
 
     await storage.updateBetStatus(bet.id, "won", cashoutMultiplier, winAmount);
     const newBalance = await storage.adjustWalletBalance(userId, winAmount);
+    const masked = await this.getMaskedForUser(userId);
 
     this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
       walletBalance: newBalance ?? 0,
@@ -397,7 +578,7 @@ export class GameEngine {
         winAmount,
         createdAt: bet.createdAt ?? Date.now(),
       },
-      user: { id: userId },
+      user: { id: userId, username: masked },
       timestamp: Date.now(),
     });
 

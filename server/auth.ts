@@ -114,10 +114,22 @@ export function setupAuth(app: Express) {
 
       const ip = getClientIp(req);
       const hashedPassword = await hashPassword(password);
-      const user = await storage.createUser({
+      let user = await storage.createUser({
         phone,
         password: hashedPassword,
       });
+
+      // ── Welcome bonus ──
+      // Credit KES 50 (5000 cents) to the wallet so new players can try the
+      // game immediately. The bonus is NOT counted toward `total_deposited`,
+      // so the existing "deposit before withdrawing" gate still forces a
+      // real M-Pesa top-up before any winnings can be cashed out.
+      const SIGNUP_BONUS_CENTS = 5000;
+      const newBalance = await storage.adjustWalletBalance(user.id, SIGNUP_BONUS_CENTS);
+      if (newBalance !== null) {
+        const refreshed = await storage.getUser(user.id);
+        if (refreshed) user = refreshed;
+      }
 
       // Track IP for fraud detection
       if (ip) await storage.updateUserMeta(user.id, { lastIp: ip });
