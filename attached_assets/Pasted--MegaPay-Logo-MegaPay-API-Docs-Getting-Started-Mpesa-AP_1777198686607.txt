@@ -1,0 +1,365 @@
+
+MegaPay Logo MegaPay API Docs
+
+    Getting Started
+    Mpesa API
+    Initiate STK Push
+    Transaction Status
+    MegaPay Wallet
+    Deposit Money
+    Instant Withdrawal
+    WebHooks
+    Supported Banks
+
+Getting Started
+
+Welcome to the comprehensive MegaPay API documentation. This guide will help you understand how to integrate our payment and SMS services into your applications. Our APIs are designed to be developer-friendly with clear documentation and practical examples.
+
+MegaPay offers multiple services:
+
+    Mpesa Integration: STK Push payments and transaction status checking
+    Wallet Services: Fund management and instant withdrawals
+    Webhooks: Real-time notifications for your applications
+
+To get started with our API integration, you need an API Key. To obtain one:
+
+    Login to your MegaPay Account
+    Navigate to Linked Accounts and copy your API Key
+    If you see "no data", go to Account Setup and link your Till, Paybill, or Bank Account
+    You'll then be redirected to Linked Accounts where you can get your API Key
+
+GET SOURCE CODE ON GITHUB
+ACCESS DASHBOARD
+Mpesa API Integration
+
+MegaPay Mpesa API enables you to collect payments on your website or mobile app through M-Pesa STK Push. The money is automatically sent to your M-Pesa till number, paybill number, or bank account that you have connected to your MegaPay account.
+Initiate STK Push
+POST
+https://megapay.co.ke/backend/v1/initiatestk
+Headers
+Header 	Description 	Value
+Content-Type 	The Accept request HTTP header advertises which content types the client can understand. 	application/json
+Parameters
+Parameter 	Type 	Required 	Description 	Sample Value
+api_key 	string 	Required 	API key obtained from your MegaPay Account 	nluhfjdgbmzfyjrwzsbqkwcsijb
+email 	string 	Required 	Email that you use to login into PesaFlux Account 	example@gmail.com
+amount 	number 	Required 	Amount to request from your customer in KES 	1
+msisdn 	string 	Required 	Phone number to request money from 	254768783443 OR 0768783443
+reference 	string 	Optional 	A unique reference that will be used to identify the transaction 	6527990
+Request Example
+JSON Request Body
+
+{
+    "api_key": "nluhfjdgbmzfyjrwzsbqkwcsijb",
+    "email": "example@gmail.com",
+    "amount": "30",
+    "msisdn": "254768783443",
+    "reference": "6527990"
+}
+
+Success Response
+200 OK - Success Response
+
+{
+    "success": "200",
+    "massage": "Request sent sucessfully.",
+    "transaction_request_id": "SOFTPID2809202423523970891"
+}
+
+Callback Response (Success)
+Webhook Success Payload
+
+{
+    "ResponseCode": 0,
+    "ResponseDescription": "Success. Request accepted for processing",
+    "MerchantRequestID": "dab3-4cb9-9110-99918efd35e39105683",
+    "CheckoutRequestID": "ws_CO_28092024222014167769290734",
+    "TransactionID": "SOFTPID2809202422201241148",
+    "TransactionAmount": 2,
+    "TransactionReceipt": "SIS88JC7AM",
+    "TransactionDate": "20240928222012",
+    "TransactionReference": "8803416",
+    "Msisdn": "254769290734"
+}
+
+Error Response
+Error Response Example
+
+{
+    "ResponseCode": 1032,
+    "ResponseDescription": "Request cancelled by user",
+    "MerchantRequestID": "c687-4e11-bbe3-3e2fd41c9911951313",
+    "CheckoutRequestID": "ws_CO_28092024232536273769290734",
+    "TransactionID": "SOFTPID2809202423253425286",
+    "TransactionAmount": 640,
+    "TransactionDate": "20240928232534",
+    "TransactionReference": "1",
+    "Msisdn": "254769290734"
+}
+
+Error Response Codes
+ResponseCode 	ResponseDescription
+0 	Success. Request accepted for processing
+1 	The balance is insufficient for the transaction.
+1032 	Request cancelled by user
+1037 	DS timeout user cannot be reached
+1025 	An error occurred while sending a push request
+9999 	An error occurred while sending a push request.
+2001 	The initiator information is invalid.
+1019 	Transaction has expired
+1001 	Unable to lock subscriber, a transaction is already in process for the current subscriber
+Transaction Status
+POST
+https://megapay.co.ke/backend/v1/transactionstatus
+Parameters
+Parameter 	Type 	Required 	Description 	Sample Value
+api_key 	string 	Required 	API key obtained from your MegaPay Account 	nluhfjdgbmzfyjrwzsbqkwcsijb
+email 	string 	Required 	Email that you use to login into MegaPay Account 	example@gmail.com
+transaction_request_id 	string 	Required 	Transaction id that you get after initiating stk push 	SOFTPID2809202423253425286
+Request Example
+JSON Request Body
+
+{
+    "api_key": "nluhfjdgbmzfyjrwzsbqkwcsijb",
+    "email": "example@gmail.com",
+    "transaction_request_id": "SOFTPID2809202423253425286"
+}
+
+Response
+Transaction Status Response
+
+{
+    "ResultCode": "200",
+    "ResultDesc": "Success. Request accepted for processing",
+    "TransactionID": "SOFTPID2809202423523970891",
+    "TransactionStatus": "Completed",
+    "TransactionCode": "0",
+    "TransactionReceipt": "SIS48OB9N4",
+    "TransactionAmount": "10",
+    "Msisdn": "254768783443",
+    "TransactionDate": "202423491281280",
+    "TransactionReference": "8803416"
+}
+
+MegaPay Wallet
+
+MegaPay Wallet provides a convenient way to manage your funds. You can deposit money into your wallet and make instant withdrawals to your preferred accounts.
+Deposit Money
+
+Add funds to your MegaPay wallet quickly and securely using M-Pesa or bank transfer.
+Deposit Now
+Instant Withdrawal
+
+Withdraw your earnings instantly to your M-Pesa, bank account, or other supported methods.
+Withdraw Now
+Note:
+All wallet operations are handled through the MegaPay Wallet interface. API endpoints for wallet operations will be available in future updates.
+WebHooks
+
+WebHooks allow your application to receive real-time notifications when transactions are completed. This eliminates the need to continuously poll our API for transaction status updates.
+Setting Up WebHooks
+
+    Login to your MegaPay account at https://megapay.co.ke/user
+    Navigate to Account Settings or API Settings
+    Enter your webhook URL in the designated field
+    Save your settings
+    Test your webhook endpoint to ensure it can receive POST requests
+
+Webhook Payload Structure
+
+When a transaction is completed, MegaPay will send a POST request to your webhook URL with the following payload:
+Webhook Payload Example
+
+{
+    "ResponseCode": 0,
+    "ResponseDescription": "Success. Request accepted for processing",
+    "MerchantRequestID": "dab3-4cb9-9110-99918efd35e39105683",
+    "CheckoutRequestID": "ws_CO_28092024222014167769290734",
+    "TransactionID": "SOFTPID2809202422201241148",
+    "TransactionAmount": 100,
+    "TransactionReceipt": "SIS88JC7AM",
+    "TransactionDate": "20240928222012",
+    "TransactionReference": "ORDER_12345",
+    "Msisdn": "254769290734"
+}
+
+Webhook Parameters
+Parameter 	Type 	Description
+ResponseCode 	integer 	Transaction response code (0 = success, other = error)
+ResponseDescription 	string 	Human-readable description of the transaction result
+MerchantRequestID 	string 	Unique identifier for the merchant request
+CheckoutRequestID 	string 	Unique identifier for the checkout request
+TransactionID 	string 	PesaFlux transaction identifier
+TransactionAmount 	number 	Amount transacted in KES
+TransactionReceipt 	string 	M-Pesa transaction receipt number
+TransactionDate 	string 	Date and time when transaction was completed
+TransactionReference 	string 	Your custom reference passed during STK initiation
+Msisdn 	string 	Phone number that made the payment
+PHP Webhook Handler Example
+PHP Webhook Handler
+
+<?php
+// webhook.php - Handle MegaPay webhook notifications
+
+// Get the raw POST data
+$json = file_get_contents('php://input');
+$data = json_decode($json, true);
+
+// Log the webhook data for debugging
+error_log("MegaPay Webhook: " . $json);
+
+// Validate the webhook data
+if (!$data || !isset($data['TransactionID'])) {
+    http_response_code(400);
+    echo "Invalid webhook data";
+    exit;
+}
+
+// Extract transaction details
+$responseCode = $data['ResponseCode'];
+$transactionId = $data['TransactionID'];
+$amount = $data['TransactionAmount'];
+$receipt = $data['TransactionReceipt'];
+$phone = $data['Msisdn'];
+$reference = $data['TransactionReference'];
+
+// Process the transaction based on response code
+if ($responseCode == 0) {
+    // Transaction successful
+    processSuccessfulPayment($transactionId, $amount, $receipt, $phone, $reference);
+    
+    // Send success response
+    http_response_code(200);
+    echo json_encode(['status' => 'success', 'message' => 'Webhook processed']);
+    
+} else {
+    // Transaction failed
+    processFailedPayment($transactionId, $responseCode, $data['ResponseDescription']);
+    
+    // Send success response (acknowledge receipt)
+    http_response_code(200);
+    echo json_encode(['status' => 'received', 'message' => 'Failed transaction logged']);
+}
+
+function processSuccessfulPayment($transactionId, $amount, $receipt, $phone, $reference) {
+    // Your business logic here
+    // Example: Update database, send confirmation email, etc.
+    
+    // Database connection (replace with your details)
+    $pdo = new PDO('mysql:host=localhost;dbname=your_db', 'username', 'password');
+    
+    // Update payment status in database
+    $stmt = $pdo->prepare("
+        UPDATE payments 
+        SET status = 'completed', 
+            transaction_receipt = ?, 
+            completed_at = NOW() 
+        WHERE transaction_id = ?
+    ");
+    $stmt->execute([$receipt, $transactionId]);
+    
+    // Send confirmation email/SMS to customer
+    sendConfirmation($phone, $amount, $receipt);
+}
+
+function processFailedPayment($transactionId, $responseCode, $description) {
+    // Log failed transaction
+    $pdo = new PDO('mysql:host=localhost;dbname=your_db', 'username', 'password');
+    
+    $stmt = $pdo->prepare("
+        UPDATE payments 
+        SET status = 'failed', 
+            failure_reason = ?, 
+            failed_at = NOW() 
+        WHERE transaction_id = ?
+    ");
+    $stmt->execute([$description, $transactionId]);
+}
+
+function sendConfirmation($phone, $amount, $receipt) {
+    // Send SMS confirmation using FluxSMS API
+    $message = "Payment of KES {$amount} received successfully. Receipt: {$receipt}. Thank you!";
+    
+    // Use FluxSMS API to send confirmation
+    // Implementation depends on your SMS setup
+}
+?>
+
+Webhook Security Best Practices
+
+    Validate webhook data: Always validate incoming webhook data before processing
+    Use HTTPS: Ensure your webhook endpoint uses HTTPS for secure communication
+    Implement idempotency: Handle duplicate webhook calls gracefully
+    Log webhook data: Keep logs of all webhook calls for debugging and audit purposes
+    Respond quickly: Return HTTP 200 status code within 10 seconds
+    Handle failures: Implement proper error handling and retry mechanisms
+
+Testing Your Webhook
+
+You can test your webhook endpoint using tools like:
+
+    Postman: Send test POST requests to your webhook URL
+    ngrok: Expose your local development server for testing
+    Webhook.site: Create temporary webhook URLs for testing
+
+Test Webhook with cURL
+
+curl -X POST https://your-domain.com/webhook.php \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ResponseCode": 0,
+    "ResponseDescription": "Success. Request accepted for processing",
+    "MerchantRequestID": "test-merchant-id",
+    "CheckoutRequestID": "test-checkout-id",
+    "TransactionID": "TEST_TRANSACTION_123",
+    "TransactionAmount": 100,
+    "TransactionReceipt": "TEST_RECEIPT",
+    "TransactionDate": "20241201120000",
+    "TransactionReference": "TEST_REF_123",
+    "Msisdn": "254712345678"
+  }'
+
+Supported Banks
+
+MegaPay supports direct deposits to major Kenyan banks. You can link your bank account to receive payments directly from M-Pesa transactions.
+Major Banks
+
+    Kenya Commercial Bank (KCB)
+    Equity Bank
+    Cooperative Bank
+    Standard Chartered Bank
+    Absa Bank Kenya
+    NCBA Bank
+
+Other Supported Banks
+
+    Diamond Trust Bank (DTB)
+    I&M Bank
+    Stanbic Bank
+    Family Bank
+    Prime Bank
+    Gulf African Bank
+
+Mobile Money
+
+    M-Pesa (Safaricom)
+    Airtel Money
+    T-Kash (Telkom)
+    Till Numbers
+    Paybill Numbers
+    Buy Goods & Services
+
+Account Setup
+
+To link your bank account or mobile money:
+
+    Login to your MegaPay account
+    Go to Account Setup
+    Select your preferred bank or mobile money option
+    Provide the required account details
+    Verify your account information
+    Start receiving payments directly
+
+Link Account Now
+Note:
+Processing times may vary depending on the bank or mobile money provider. Most transactions are processed instantly, while bank transfers may take 1-3 business days.

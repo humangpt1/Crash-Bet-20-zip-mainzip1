@@ -1,0 +1,177 @@
+DEPOSIT FLOW (STK PUSH):
+
+1. User inputs:
+
+   * phone number (msisdn, auto-format to 2547XXXXXXXX)
+   * amount (KES, validate > 0 and reasonable limit)
+
+2. Frontend sends request:
+   POST /api/deposit
+
+3. Backend logic:
+
+   * Validate inputs (amount, phone format)
+   * Generate unique reference (e.g. ORDER_timestamp_random)
+   * Call MegaPay API:
+     https://megapay.co.ke/backend/v1/initiatestk
+     with:
+
+     * api_key (env)
+     * email (env)
+     * amount
+     * msisdn
+     * reference
+
+4. On success response:
+
+   * Store transaction:
+     {
+     transaction_request_id,
+     reference,
+     amount,
+     msisdn,
+     status: "pending",
+     createdAt
+     }
+   * Return success to frontend
+
+5. Frontend feedback:
+
+   * Show: "Check your phone to complete payment 📲"
+   * Disable repeated clicks (prevent spam)
+   * Optionally show pending status
+
+---
+
+WEBHOOK (CRITICAL):
+
+POST /api/webhook/megapay
+
+* Accept raw JSON payload
+
+* Validate required fields:
+
+  * TransactionID
+  * ResponseCode
+  * TransactionAmount
+  * Msisdn
+  * TransactionReference
+
+* Idempotency:
+
+  * If TransactionID already processed → ignore
+
+Logic:
+IF ResponseCode == 0:
+
+* Find transaction by TransactionReference
+
+* If not already completed:
+
+  * Update status → "completed"
+  * Credit walletBalance += TransactionAmount
+  * Store receipt + timestamp
+    ELSE:
+
+* Update status → "failed"
+
+* Always respond:
+  HTTP 200 { status: "received" }
+
+---
+
+WITHDRAW FLOW (SAFE):
+
+POST /api/withdraw
+
+1. User inputs:
+
+   * amount
+   * phone number
+
+2. Backend validation:
+
+   * amount > 0
+   * amount <= walletBalance
+   * enforce minimum withdrawal (e.g. 10 KES)
+   * enforce rate limit (cooldown per user)
+
+3. Processing:
+
+   * Deduct balance immediately (lock funds)
+   * Create withdrawal record:
+     {
+     id,
+     amount,
+     msisdn,
+     status: "processing",
+     createdAt
+     }
+
+4. Simulate payout (since no API provided):
+
+   * After short delay → mark "completed"
+   * If failure → refund balance
+
+5. Prevent:
+
+   * duplicate withdrawals
+   * rapid repeated requests
+   * invalid numbers
+
+---
+
+SECURITY (MANDATORY):
+
+* Store secrets in env:
+
+  * MEGAPAY_API_KEY
+  * MEGAPAY_EMAIL
+
+* Never expose secrets to frontend
+
+* Validate:
+
+  * all inputs
+  * webhook payload structure
+
+* Implement:
+
+  * idempotency for webhook
+  * transaction locking
+  * basic anti-replay checks
+
+---
+
+API ROUTES:
+
+* POST /api/deposit
+* POST /api/webhook/megapay
+* POST /api/withdraw
+* GET /api/wallet
+
+---
+
+UI/UX (MOBILE FIRST):
+
+* Wallet dashboard:
+
+  * Balance display
+  * Deposit + Withdraw buttons
+* Feedback messages:
+
+  * "Inaleta push 📲"
+  * "Imeland 🔥"
+  * "Imebounce 😅"
+* Show transaction history with status:
+
+  * pending / completed / failed
+
+---
+
+PRIORITY:
+
+1. Secure deposit handling
+2. Reliable webhook processing
+3. Safe withdrawal logic
+4. Smooth mobile experience
