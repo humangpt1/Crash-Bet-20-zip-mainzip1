@@ -3,7 +3,7 @@ import { api } from "@shared/routes";
 import { type User } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
 
-type Credentials = { phone: string; password: string };
+type Credentials = { phone: string; password: string; referralCode?: string };
 
 export function useAuth() {
   const queryClient = useQueryClient();

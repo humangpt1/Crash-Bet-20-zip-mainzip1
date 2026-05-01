@@ -93,9 +93,44 @@ POST /api/admin/withdrawals/:id/complete   { receipt }
 POST /api/admin/withdrawals/:id/reject     { reason }
 ```
 
+## Referral system
+
+- Every user gets a unique 6-char hex `referral_code` on registration.
+- The referral link is `https://<host>/auth?ref=<code>` — visiting it pre-fills the referral code in the register form.
+- When a new user signs up using a valid code, both the **referee** (new user, KES 50) and the **referrer** (existing user, KES 50) are credited immediately.
+- Referral code and link are exposed via `GET /api/referral` (auth required).
+- Referrers can share via the Share icon in the header → toggles a copy-link banner.
+
+## House economics
+
+| Mechanism | Detail |
+|-----------|--------|
+| `HOUSE_EDGE` | `0.50` — players' long-run EV ≈ 50 cents per KES staked |
+| `INSTANT_BUST_CHANCE` | `0.35` — ~35 % of rounds bust at exactly 1.00x |
+| **Force bust after high multiplier** | If the previous round's crash point was > 2.0x, the next round is forced to 1.00x regardless of RNG. Prevents two good rounds in a row. |
+| **No consecutive wins** | Real players who cashed out in round N cannot cash out in round N+1 — manual or auto-cashout both blocked. Bet rides to the crash. |
+| Fake player threshold | Fakes are suppressed once ≥ 20 real bettors join the round. |
+| Online count floor | Always shows ≥ 30 online (realConnections + 28). |
+
+## Online count
+
+The green "online" pill in the header is broadcast in every `state_update` WS event. Floor of 30 even with 0 real users so the room always looks active.
+
+## Withdrawal rules (new)
+
+- Must have deposited AND placed at least one bet before withdrawing.
+- Wagering requirement: 2× `total_deposited` must be wagered.
+- Daily limit: KES 70 000.
+- Min withdrawal: KES 100.
+
 ## Webhook URL
 
 Configure in the MegaPay dashboard (Account Settings) to your deployment + `/api/wallet/webhook`. The handler is idempotent (unique `(provider, transactionId)` row in `webhook_log`).
+
+**The exact webhook URL is printed to the console every time the server starts** — look for the `[webhook]` log line. Example:
+```
+[webhook] MegaPay webhook URL → https://your-domain.replit.dev/api/wallet/webhook
+```
 
 ## Withdrawals
 

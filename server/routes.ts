@@ -184,6 +184,9 @@ export async function registerRoutes(
     if ((user.totalDeposited ?? 0) === 0) {
       canWithdraw = false;
       withdrawBlockedReason = "Make at least one deposit before withdrawing";
+    } else if ((user.totalWagered ?? 0) === 0) {
+      canWithdraw = false;
+      withdrawBlockedReason = "You must place at least one bet before withdrawing";
     } else if (!wageringMet) {
       canWithdraw = false;
       withdrawBlockedReason = `Wager KES ${(wageringRemaining / 100).toFixed(0)} more to unlock withdrawals`;
@@ -356,6 +359,13 @@ export async function registerRoutes(
         return res
           .status(400)
           .json({ message: "Make a deposit before withdrawing" });
+      }
+
+      // Rule: must have played at least once
+      if ((user.totalWagered ?? 0) === 0) {
+        return res
+          .status(400)
+          .json({ message: "You must place at least one bet before withdrawing" });
       }
 
       // Rule: wagering 2× total deposits

@@ -13,6 +13,7 @@ export interface GameState {
   roundId?: number;
   elapsed: number;
   crashPoint?: number;
+  onlineCount?: number;
 }
 
 export interface PlayerBet {

@@ -115,5 +115,15 @@ app.use((req, res, next) => {
 
   httpServer.listen(port, () => {
     log(`serving on port ${port}`);
+
+    // ── Webhook URL reminder ──
+    // The MegaPay dashboard needs this URL set as the webhook endpoint.
+    const publicHost =
+      process.env.REPLIT_DEV_DOMAIN ||
+      process.env.REPL_SLUG
+        ? `https://${process.env.REPLIT_DEV_DOMAIN || process.env.REPL_SLUG + "." + process.env.REPL_OWNER + ".repl.co"}`
+        : `http://localhost:${port}`;
+    log(`MegaPay webhook URL → ${publicHost}/api/wallet/webhook`, "webhook");
+    log(`Set this URL in your MegaPay dashboard under API / Account Settings.`, "webhook");
   });
 })();

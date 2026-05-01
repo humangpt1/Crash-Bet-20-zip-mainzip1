@@ -106,10 +106,26 @@ export function setupAuth(app: Express) {
         });
       }
       const { phone, password } = parsed.data;
+      const referralCodeInput: string | undefined = req.body.referralCode;
 
       const existingByPhone = await storage.getUserByPhone(phone);
       if (existingByPhone) {
         return res.status(400).json({ message: "Phone number already registered" });
+      }
+
+      // Resolve referrer
+      let referrer: typeof import("@shared/schema").users.$inferSelect | undefined;
+      if (referralCodeInput) {
+        referrer = await storage.getUserByReferralCode(referralCodeInput.trim().toUpperCase());
+      }
+
+      // Generate a unique 6-char referral code for this new user
+      const { randomBytes } = await import("crypto");
+      let newReferralCode: string = "";
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const candidate = randomBytes(3).toString("hex").toUpperCase(); // 6 chars
+        const existing = await storage.getUserByReferralCode(candidate);
+        if (!existing) { newReferralCode = candidate; break; }
       }
 
       const ip = getClientIp(req);
@@ -117,24 +133,27 @@ export function setupAuth(app: Express) {
       let user = await storage.createUser({
         phone,
         password: hashedPassword,
+        referralCode: newReferralCode || undefined,
+        referredBy: referrer?.id ?? null,
       });
 
-      // ── Welcome bonus ──
-      // Credit KES 50 (5000 cents) to the wallet so new players can try the
-      // game immediately. The bonus is NOT counted toward `total_deposited`,
-      // so the existing "deposit before withdrawing" gate still forces a
-      // real M-Pesa top-up before any winnings can be cashed out.
+      // ── Welcome bonus (KES 50) ──
       const SIGNUP_BONUS_CENTS = 5000;
-      const newBalance = await storage.adjustWalletBalance(user.id, SIGNUP_BONUS_CENTS);
-      if (newBalance !== null) {
-        const refreshed = await storage.getUser(user.id);
-        if (refreshed) user = refreshed;
+      await storage.adjustWalletBalance(user.id, SIGNUP_BONUS_CENTS);
+
+      // ── Referral bonus: credit referrer KES 50 ──
+      if (referrer) {
+        const REFERRAL_BONUS_CENTS = 5000;
+        await storage.adjustWalletBalance(referrer.id, REFERRAL_BONUS_CENTS);
+        console.log(`Referral bonus: user ${referrer.id} earned KES 50 for referring ${user.id}`);
       }
+
+      const refreshed = await storage.getUser(user.id);
+      if (refreshed) user = refreshed;
 
       // Track IP for fraud detection
       if (ip) await storage.updateUserMeta(user.id, { lastIp: ip });
 
-      // Flag if many accounts from same IP
       if (ip) {
         const count = await storage.countAccountsByIp(ip);
         if (count >= 3) {
@@ -155,6 +174,16 @@ export function setupAuth(app: Express) {
     } catch (err) {
       next(err);
     }
+  });
+
+  // Return the calling user's referral code & stats
+  app.get("/api/referral", (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    const user = req.user as import("@shared/schema").User;
+    res.json({
+      referralCode: user.referralCode ?? null,
+      referralLink: `${req.protocol}://${req.get("host")}/auth?ref=${user.referralCode ?? ""}`,
+    });
   });
 
   // -----------------------------

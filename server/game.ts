@@ -77,6 +77,14 @@ export class GameEngine {
   private realBettorsThisRound = new Set<number>();
   private userMaskCache = new Map<number, string>();
 
+  // ── House-consistency state ──────────────────────────────────
+  /** Real user IDs that cashed out (won) in the previous completed round. */
+  private prevRoundWinners = new Set<number>();
+  /** Real user IDs that have won in the current round so far. */
+  private currentRoundWinners = new Set<number>();
+  /** Crash point of the last completed round (used to force a bust after a high multiplier). */
+  private lastCrashPoint = 1.0;
+
   constructor(server: Server) {
     this.wss = new WebSocketServer({ server, path: "/ws" });
     this.buildFakePool();
@@ -297,6 +305,13 @@ export class GameEngine {
       .digest("hex");
     this.nonce++;
 
+    // ── House-consistency rule ──────────────────────────────────
+    // If the last round had a multiplier > 2.0x (players may have won big),
+    // force an instant bust this round so the house always recovers quickly.
+    if (this.lastCrashPoint > 2.0) {
+      return 1.0;
+    }
+
     const hmac = crypto.createHmac("sha256", this.serverSeed);
     hmac.update(`${this.clientSeed}:${this.nonce}`);
     const hash = hmac.digest("hex");
@@ -424,7 +439,8 @@ export class GameEngine {
           bet.status === "active" &&
           bet.autoCashout &&
           this.multiplier >= bet.autoCashout &&
-          this.multiplier < this.crashPoint
+          this.multiplier < this.crashPoint &&
+          !this.prevRoundWinners.has(bet.userId) // no consecutive wins
         ) {
           await this.handleCashout(
             bet.userId,
@@ -455,12 +471,18 @@ export class GameEngine {
       );
     }
 
+    this.lastCrashPoint = this.crashPoint;
+
     this.broadcast(wsEvents.SERVER_ROUND_CRASH, {
       crashPoint: this.crashPoint,
       multiplier: this.multiplier,
       serverSeed: this.serverSeed,
       timestamp: Date.now(),
     });
+
+    // Roll winner sets: previous winners are next round's blocked winners.
+    this.prevRoundWinners = new Set(this.currentRoundWinners);
+    this.currentRoundWinners.clear();
 
     this.broadcastState();
     setTimeout(() => this.startNewRound(), 3000);
@@ -550,6 +572,13 @@ export class GameEngine {
 
     if (!bet) throw new Error("No active bet found for this slot");
 
+    // ── No-consecutive-wins rule ─────────────────────────────────
+    // If this user cashed out in the PREVIOUS round, they cannot win again
+    // this round. Their bet will ride until the crash.
+    if (this.prevRoundWinners.has(userId)) {
+      throw new Error("Cannot win two rounds in a row — cash out next round!");
+    }
+
     const cashoutMultiplier = cashoutValue ?? this.multiplier;
     if (cashoutMultiplier > this.crashPoint + 0.001) {
       throw new Error("Cashout value exceeds crash point");
@@ -560,6 +589,7 @@ export class GameEngine {
     await storage.updateBetStatus(bet.id, "won", cashoutMultiplier, winAmount);
     const newBalance = await storage.adjustWalletBalance(userId, winAmount);
     const masked = await this.getMaskedForUser(userId);
+    this.currentRoundWinners.add(userId);
 
     this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
       walletBalance: newBalance ?? 0,
@@ -590,12 +620,17 @@ export class GameEngine {
   }
 
   public getStatus() {
+    // Show at least 30 "online" even with zero real connections so the room
+    // always looks lively. Real count is added on top.
+    const realOnline = this.wss.clients.size;
+    const onlineCount = Math.max(30, realOnline + 28);
     return {
       status: this.status,
       multiplier: this.multiplier,
       roundId: this.currentRoundId,
       elapsed: this.status === "active" ? Date.now() - this.startTime : 0,
       serverSeedHash: this.serverSeedHash,
+      onlineCount,
     };
   }
 }

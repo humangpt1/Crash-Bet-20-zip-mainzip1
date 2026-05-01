@@ -1,0 +1,102 @@
+Using webhooks in MegaPay is straightforward: you set up an endpoint on your server, then MegaPay sends transaction results to it automatically 📡. Below is a clean, implementation-focused breakdown.
+
+🔧 1. What a Webhook Does
+
+Instead of repeatedly calling the API to check payment status:
+
+You initiate STK Push
+MegaPay processes payment
+MegaPay POSTs the result to your webhook URL
+
+👉 This is event-driven, faster, and more efficient.
+
+🌐 2. Set Up Your Webhook URL
+
+Inside your MegaPay dashboard:
+
+Log in
+Go to API / Account Settings
+
+Add your webhook URL (e.g.):
+
+https://yourdomain.com/webhook.php
+
+Save changes
+
+⚠️ Must be:
+
+Publicly accessible
+HTTPS (recommended)
+🧠 3. Build the Webhook Endpoint
+
+Your server must:
+
+Accept POST requests
+Read raw JSON body
+Decode it
+Process based on ResponseCode
+Example (PHP)
+$json = file_get_contents('php://input');
+$data = json_decode($json, true);
+
+// Validate
+if (!$data || !isset($data['TransactionID'])) {
+    http_response_code(400);
+    exit("Invalid data");
+}
+
+// Extract values
+$responseCode = $data['ResponseCode'];
+$transactionId = $data['TransactionID'];
+$amount = $data['TransactionAmount'];
+$receipt = $data['TransactionReceipt'];
+
+if ($responseCode == 0) {
+    // SUCCESS
+    // Update DB, mark paid
+} else {
+    // FAILED
+    // Log error
+}
+
+// Always respond 200
+http_response_code(200);
+echo "OK";
+
+📦 4. Understand the Payload
+
+You’ll receive JSON like:
+
+{
+  "ResponseCode": 0,
+  "TransactionID": "SOFTPID123",
+  "TransactionAmount": 100,
+  "TransactionReceipt": "ABC123XYZ",
+  "TransactionReference": "ORDER_123",
+  "Msisdn": "2547XXXXXXXX"
+}
+
+Key fields:
+Field	Meaning
+ResponseCode	0 = success, others = failure
+TransactionID	Unique transaction ID
+TransactionReceipt	M-Pesa receipt
+TransactionReference	Your custom reference
+Msisdn	Customer phone
+⚙️ 5. What You Should Do on Success
+
+When ResponseCode == 0:
+
+✅ Mark order as paid
+✅ Save receipt number
+✅ Credit user account
+✅ Send confirmation (SMS/email)
+❌ 6. Handle Failures
+
+If not 0, log and handle:
+
+Examples:
+
+1032 → user cancelled
+1 → insufficient funds
+1037 → timeout

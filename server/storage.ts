@@ -14,7 +14,7 @@ import { db } from "./db";
 import { eq, desc, and, sql, gte } from "drizzle-orm";
 
 type AdminUserInsert = { username: string; password: string; isAdmin: number };
-type CreateUserInput = { phone: string; password: string; username?: string | null };
+type CreateUserInput = { phone: string; password: string; username?: string | null; referralCode?: string; referredBy?: number | null };
 
 export class DatabaseStorage {
   // -------- USER --------
@@ -36,6 +36,14 @@ export class DatabaseStorage {
     return user;
   }
 
+  async getUserByReferralCode(code: string): Promise<User | undefined> {
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.referralCode, code.toUpperCase()));
+    return user;
+  }
+
   async createUser(input: CreateUserInput): Promise<User> {
     const [user] = await db
       .insert(users)
@@ -43,6 +51,8 @@ export class DatabaseStorage {
         phone: input.phone,
         password: input.password,
         username: input.username ?? null,
+        referralCode: input.referralCode,
+        referredBy: input.referredBy ?? null,
       })
       .returning();
     return user;

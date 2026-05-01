@@ -1,7 +1,6 @@
-import React, { useMemo } from "react";
+import React from "react";
 import { type PlayerBet, type GameState } from "@/hooks/use-game";
 
-// Format cents → KSH (Kenyan Shillings)
 export function formatKsh(cents: number) {
   return Math.floor(cents / 100).toLocaleString("en-KE") + " KSH";
 }
@@ -12,118 +11,101 @@ interface LiveBetsProps {
 }
 
 export function LiveBets({ bets, gameState }: LiveBetsProps) {
-  // Group bets by slot
-  const betsBySlot = useMemo(() => {
-    const map: Record<number, PlayerBet[]> = {};
-    bets.forEach((b) => {
-      if (!map[b.playerIndex]) map[b.playerIndex] = [];
-      map[b.playerIndex].push(b);
-    });
-    return map;
-  }, [bets]);
+  const total = bets.reduce((a, b) => a + b.bet.amount, 0);
 
   return (
     <div className="bg-card/50 backdrop-blur-sm rounded-2xl border border-border/50 flex flex-col h-[400px] md:h-full overflow-hidden">
       {/* Header */}
-      <div className="p-4 border-b border-border/50 bg-background/50 flex justify-between items-center">
-        <h3 className="font-bold text-foreground flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-          Live Bets by Slot
+      <div className="p-3 border-b border-border/50 bg-background/40 flex justify-between items-center gap-2">
+        <h3 className="font-bold text-sm text-foreground flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          Live Players
         </h3>
-        <div className="text-sm font-mono text-muted-foreground">
-          {bets.length} bets |{" "}
-          {formatKsh(bets.reduce((a, b) => a + b.bet.amount, 0))}
+        <div className="text-xs font-mono text-muted-foreground text-right">
+          <span className="text-foreground font-semibold">{bets.length}</span>{" "}
+          bets · {formatKsh(total)}
         </div>
       </div>
 
-      {/* Slots List */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
-        {Object.entries(betsBySlot).map(([slotIndex, slotBets]) => (
-          <div
-            key={slotIndex}
-            className="border-b border-border/20 last:border-none pb-2 last:pb-0"
-          >
-            <div className="flex justify-between items-center mb-1 px-2">
-              <span className="font-bold text-sm">
-                Slot {Number(slotIndex) + 1}
-              </span>
-              <span className="text-xs text-muted-foreground">
-                Total:{" "}
-                {formatKsh(slotBets.reduce((a, b) => a + b.bet.amount, 0))}
-              </span>
-            </div>
-
-            {slotBets.map((pb) => {
-              const isWon = pb.bet.status === "won";
-              const isLost = pb.bet.status === "lost";
-              const isActive = pb.bet.status === "active";
-
-              const currentWin =
-                isActive || isWon
-                  ? (pb.bet.winAmount ??
-                    Math.floor(pb.bet.amount * gameState.multiplier))
-                  : 0;
-
-              let rowClass = "bg-background/20 hover:bg-background/40";
-              if (isWon)
-                rowClass =
-                  "bg-success/10 border border-success/30 text-success";
-              if (isLost) rowClass = "opacity-50 grayscale";
-              if (isActive && gameState.status === "active")
-                rowClass = "bg-yellow-100 text-yellow-800";
-
-              return (
-                <div
-                  key={pb.bet.id}
-                  className={`grid grid-cols-3 gap-2 px-3 py-2 rounded-lg text-sm items-center transition-colors ${rowClass}`}
-                >
-                  {/* User */}
-                  <div className="truncate font-medium flex items-center gap-2">
-                    <div className="w-5 h-5 rounded bg-secondary flex items-center justify-center text-[10px] text-muted-foreground uppercase">
-                      {(pb.user.username || "P").slice(0, 2)}
-                    </div>
-                    {pb.user.username || `Player ${pb.user.id}`}
-                  </div>
-
-                  {/* Bet / Multiplier */}
-                  <div className="text-right font-mono flex flex-col">
-                    <span className="text-foreground">
-                      {formatKsh(pb.bet.amount)}
-                    </span>
-                    {isWon || isActive ? (
-                      <span
-                        className={`text-xs ${isWon ? "text-success" : "text-primary"}`}
-                      >
-                        {isWon
-                          ? `${pb.bet.cashoutMultiplier?.toFixed(2)}x`
-                          : `x${gameState.multiplier.toFixed(2)}`}
-                      </span>
-                    ) : (
-                      <span className="text-xs">-</span>
-                    )}
-                  </div>
-
-                  {/* Payout */}
-                  <div
-                    className={`text-right font-mono font-bold ${isWon ? "text-success text-glow-success" : ""}`}
-                  >
-                    {isActive || isWon
-                      ? formatKsh(currentWin)
-                      : isLost
-                        ? formatKsh(0)
-                        : "-"}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ))}
-        {bets.length === 0 && (
+      {/* List */}
+      <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+        {bets.length === 0 ? (
           <div className="h-full flex items-center justify-center text-muted-foreground text-sm italic">
-            No bets placed yet
+            Waiting for bets…
           </div>
+        ) : (
+          bets.map((pb) => <BetRow key={pb.bet.id} pb={pb} gameState={gameState} />)
         )}
       </div>
+    </div>
+  );
+}
+
+function BetRow({ pb, gameState }: { pb: PlayerBet; gameState: GameState }) {
+  const { bet, user } = pb;
+  const isWon = bet.status === "won";
+  const isLost = bet.status === "lost";
+  const isActive = bet.status === "active";
+
+  const currentWin =
+    isActive || isWon
+      ? (bet.winAmount ?? Math.floor(bet.amount * gameState.multiplier))
+      : 0;
+
+  const displayName = user.username || `Player ${user.id}`;
+  const initials = displayName.slice(0, 2).toUpperCase();
+
+  let rowBg = "bg-white/5 hover:bg-white/8";
+  let textColor = "text-foreground";
+  if (isWon) {
+    rowBg = "bg-emerald-500/10 border border-emerald-500/30";
+    textColor = "text-emerald-400";
+  }
+  if (isLost) {
+    rowBg = "opacity-40";
+    textColor = "text-muted-foreground";
+  }
+  if (isActive && gameState.status === "active") {
+    rowBg = "bg-yellow-500/10 border border-yellow-500/20";
+  }
+
+  return (
+    <div
+      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition-all ${rowBg}`}
+    >
+      {/* Avatar */}
+      <div className="w-6 h-6 rounded-md bg-white/10 flex items-center justify-center font-bold text-[10px] text-muted-foreground shrink-0">
+        {initials}
+      </div>
+
+      {/* Phone */}
+      <span className={`flex-1 font-mono truncate ${textColor}`}>
+        {displayName}
+      </span>
+
+      {/* Bet amount */}
+      <span className="font-mono text-muted-foreground shrink-0">
+        {formatKsh(bet.amount)}
+      </span>
+
+      {/* Status / cashout */}
+      <span
+        className={`font-mono font-bold shrink-0 min-w-[54px] text-right ${
+          isWon
+            ? "text-emerald-400"
+            : isActive && gameState.status === "active"
+            ? "text-yellow-400"
+            : "text-muted-foreground/50"
+        }`}
+      >
+        {isWon
+          ? `+${formatKsh(currentWin)}`
+          : isActive && gameState.status === "active"
+          ? `${gameState.multiplier.toFixed(2)}x`
+          : isLost
+          ? "BUST"
+          : "-"}
+      </span>
     </div>
   );
 }

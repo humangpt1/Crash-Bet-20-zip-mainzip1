@@ -25,6 +25,9 @@ export const users = pgTable("users", {
   totalDeposited: integer("total_deposited").notNull().default(0),
   totalWagered: integer("total_wagered").notNull().default(0),
   totalWithdrawn: integer("total_withdrawn").notNull().default(0),
+  // Referral
+  referralCode: text("referral_code").unique(),
+  referredBy: integer("referred_by"),
   // Fraud / safety
   isBlocked: integer("is_blocked").notNull().default(0),
   blockReason: text("block_reason"),
