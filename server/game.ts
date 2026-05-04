@@ -17,39 +17,61 @@ interface NextBet {
 }
 
 interface FakeUser {
-  id: number; // negative, never collides with real user ids
-  masked: string; // e.g. "0712****78"
+  id: number;
+  masked: string;
 }
 
 interface FakeBet {
-  betId: number; // negative, never collides with real bet ids
+  betId: number;
   userId: number;
   masked: string;
   playerIndex: number;
-  amount: number; // cents
+  amount: number;
   autoCashout: number | null;
   status: "active" | "won";
   cashedOut: boolean;
   createdAt: number;
 }
 
-/**
- * Once at least this many DISTINCT real players have placed a bet in the
- * current round, we stop broadcasting any further fake bets.
- */
 const REAL_BETTOR_THRESHOLD = 20;
 
 /**
- * House edge configuration.
- * INSTANT_BUST_CHANCE = 0.12 → ~1 in 8 rounds crash at 1.00x (natural feel).
- * HOUSE_EDGE = 0.40 → player long-run EV ≈ 60% of stake.
- * The rest of the distribution spreads naturally across 1.5x – 20x range.
+ * Live admin-controllable settings.
+ * houseLevel 1-10 controls how aggressively the house profits.
  */
-const HOUSE_EDGE = 0.40;
-const INSTANT_BUST_CHANCE = 0.12;
+export interface GameSettings {
+  /** 1 = most generous, 10 = most profitable for house */
+  houseLevel: number;
+  /** Probability 0-1 that a round busts instantly at 1.00x */
+  instantBustChance: number;
+  /** After this many consecutive high (≥2x) rounds, force a low round */
+  consecutiveHighLimit: number;
+  /** Min fake bettors per round */
+  fakeMin: number;
+  /** Max fake bettors per round */
+  fakeMax: number;
+}
 
-// How many rounds to track for forced-recovery (avoids long win streaks)
-const CONSECUTIVE_HIGH_MULTIPLIER_LIMIT = 2;
+export let gameSettings: GameSettings = {
+  houseLevel: 5,
+  instantBustChance: 0.10,
+  consecutiveHighLimit: 3,
+  fakeMin: 70,
+  fakeMax: 130,
+};
+
+export function updateGameSettings(patch: Partial<GameSettings>) {
+  gameSettings = { ...gameSettings, ...patch };
+}
+
+/**
+ * Map houseLevel (1-10) to an extra low-crash probability ON TOP of instantBustChance.
+ * Level 1 = 0% extra (only the explicit bust chance matters)
+ * Level 10 = 20% extra probability of landing in 1.01x-1.50x "near-bust" zone.
+ */
+function extraLowProb(level: number): number {
+  return ((level - 1) / 9) * 0.20;
+}
 
 export class GameEngine {
   private wss: WebSocketServer;
@@ -58,7 +80,7 @@ export class GameEngine {
   private crashPoint = 1.0;
   private multiplier = 1.0;
   private startTime = 0;
-  private growthRate = 0.06;
+  private growthRate = 0.07;
   private gameLoop: NodeJS.Timeout | null = null;
   private stateBroadcastInterval: NodeJS.Timeout | null = null;
   private bettingTimeout: NodeJS.Timeout | null = null;
@@ -68,11 +90,9 @@ export class GameEngine {
   private nonce = 0;
   private nextBets: Record<number, Record<number, NextBet>> = {};
 
-  // Simulated online count — randomized between 70-130 and drifts
   private simulatedOnline = 95;
   private onlineDriftInterval: NodeJS.Timeout | null = null;
 
-  // ── Fake-player simulator state ─────────────────────────────
   private fakePool: FakeUser[] = [];
   private fakeBetSeq = 0;
   private currentRoundFakeBets = new Map<number, FakeBet>();
@@ -80,13 +100,10 @@ export class GameEngine {
   private realBettorsThisRound = new Set<number>();
   private userMaskCache = new Map<number, string>();
 
-  // ── House-consistency state ──────────────────────────────────
-  /** Real user IDs that cashed out (won) in the previous completed round. */
   private prevRoundWinners = new Set<number>();
-  /** Real user IDs that have won in the current round so far. */
   private currentRoundWinners = new Set<number>();
-  /** Count of consecutive rounds with crash point >= 2.0x */
   private consecutiveHighRounds = 0;
+  private lastCrashPointForLog = 1.0;
 
   constructor(server: Server) {
     this.wss = new WebSocketServer({ server, path: "/ws" });
@@ -96,22 +113,15 @@ export class GameEngine {
     this.startNewRound();
   }
 
-  // ── Simulated online count drifts naturally between 70 and 130 ──
   private startOnlineDrift() {
     this.simulatedOnline = 80 + Math.floor(Math.random() * 40);
     this.onlineDriftInterval = setInterval(() => {
-      const delta = Math.floor(Math.random() * 5) - 2; // -2 to +2
-      this.simulatedOnline = Math.min(
-        130,
-        Math.max(70, this.simulatedOnline + delta),
-      );
+      const delta = Math.floor(Math.random() * 7) - 3;
+      this.simulatedOnline = Math.min(130, Math.max(70, this.simulatedOnline + delta));
     }, 3000);
   }
 
-  // ────────────────────────────────────────────────
-  // Fake-player simulator
-  // ────────────────────────────────────────────────
-  private buildFakePool(size = 150) {
+  private buildFakePool(size = 200) {
     const prefixes = ["070", "071", "072", "074", "079", "0110", "0111"];
     this.fakePool = [];
     for (let i = 0; i < size; i++) {
@@ -119,10 +129,7 @@ export class GameEngine {
       let n = "";
       for (let k = 0; k < 10 - p.length; k++) n += Math.floor(Math.random() * 10);
       const phone = p + n;
-      this.fakePool.push({
-        id: -(1000 + i),
-        masked: maskPhone(phone),
-      });
+      this.fakePool.push({ id: -(1000 + i), masked: maskPhone(phone) });
     }
   }
 
@@ -131,21 +138,18 @@ export class GameEngine {
     this.fakeTimers = [];
   }
 
-  /**
-   * During the 5-second betting window, drip 70-130 fake bets onto the wire so
-   * the live-bets feed always feels very busy.
-   */
   private seedFakeBets(roundId: number) {
     this.cancelFakeTimers();
     this.currentRoundFakeBets.clear();
 
-    const target = 70 + Math.floor(Math.random() * 61); // 70..130
+    const { fakeMin, fakeMax } = gameSettings;
+    const target = fakeMin + Math.floor(Math.random() * (fakeMax - fakeMin + 1));
     const pool = [...this.fakePool]
       .sort(() => Math.random() - 0.5)
       .slice(0, Math.min(target, this.fakePool.length));
 
     pool.forEach((fp) => {
-      const delay = 80 + Math.floor(Math.random() * 4700); // spread across 5s window
+      const delay = 80 + Math.floor(Math.random() * 4700);
       const t = setTimeout(() => {
         if (this.currentRoundId !== roundId) return;
         if (this.realBettorsThisRound.size >= REAL_BETTOR_THRESHOLD) return;
@@ -158,39 +162,35 @@ export class GameEngine {
 
   private placeFakeBet(fp: FakeUser, roundId: number) {
     const r = Math.random();
-    const kesAmount = Math.floor(10 + Math.pow(r, 2.2) * 9990);
+    // Weight amounts toward small bets (KES 10-500) with a long tail to 10k
+    const kesAmount = r < 0.6
+      ? Math.floor(10 + Math.random() * 490)        // 60%: KES 10-500
+      : r < 0.85
+      ? Math.floor(500 + Math.random() * 1500)      // 25%: KES 500-2000
+      : Math.floor(2000 + Math.random() * 8000);    // 15%: KES 2000-10000
     const amountCents = kesAmount * 100;
     const playerIndex = Math.random() < 0.5 ? 0 : 1;
 
-    // 65% set an auto-cashout (1.20x..6.00x). Rest ride bare.
+    // Fake auto-cashout: most set low (1.2x-2.5x) giving excitement, some set higher
     let autoCashout: number | null = null;
-    if (Math.random() < 0.65) {
-      autoCashout = +(1.2 + Math.random() * 4.8).toFixed(2);
-    }
+    const acr = Math.random();
+    if (acr < 0.30) autoCashout = +(1.2 + Math.random() * 0.8).toFixed(2);       // 30%: 1.2-2.0x
+    else if (acr < 0.55) autoCashout = +(2.0 + Math.random() * 1.5).toFixed(2);  // 25%: 2-3.5x
+    else if (acr < 0.70) autoCashout = +(3.5 + Math.random() * 6.5).toFixed(2);  // 15%: 3.5-10x
+    // 30% ride bare (no auto-cashout)
 
     const betId = -(++this.fakeBetSeq);
     const fb: FakeBet = {
-      betId,
-      userId: fp.id,
-      masked: fp.masked,
-      playerIndex,
-      amount: amountCents,
-      autoCashout,
-      status: "active",
-      cashedOut: false,
-      createdAt: Date.now(),
+      betId, userId: fp.id, masked: fp.masked, playerIndex,
+      amount: amountCents, autoCashout, status: "active",
+      cashedOut: false, createdAt: Date.now(),
     };
     this.currentRoundFakeBets.set(betId, fb);
 
     this.broadcast(wsEvents.SERVER_BET_PLACED, {
       bet: {
-        id: betId,
-        roundId,
-        userId: fp.id,
-        playerIndex,
-        amount: amountCents,
-        autoCashout,
-        status: "active",
+        id: betId, roundId, userId: fp.id, playerIndex,
+        amount: amountCents, autoCashout, status: "active",
         createdAt: fb.createdAt,
       },
       user: { id: fp.id, username: fp.masked },
@@ -202,25 +202,16 @@ export class GameEngine {
     const m = this.multiplier;
     this.currentRoundFakeBets.forEach((fb) => {
       if (fb.cashedOut || fb.status !== "active") return;
-      if (
-        fb.autoCashout &&
-        m >= fb.autoCashout &&
-        m < this.crashPoint
-      ) {
+      if (fb.autoCashout && m >= fb.autoCashout && m < this.crashPoint) {
         fb.cashedOut = true;
         fb.status = "won";
         const winAmount = Math.floor(fb.amount * fb.autoCashout);
         this.broadcast(wsEvents.SERVER_BET_CASHED_OUT, {
           bet: {
-            id: fb.betId,
-            roundId: this.currentRoundId,
-            userId: fb.userId,
-            playerIndex: fb.playerIndex,
-            amount: fb.amount,
-            autoCashout: fb.autoCashout,
-            status: "won",
-            cashoutMultiplier: fb.autoCashout,
-            winAmount,
+            id: fb.betId, roundId: this.currentRoundId, userId: fb.userId,
+            playerIndex: fb.playerIndex, amount: fb.amount,
+            autoCashout: fb.autoCashout, status: "won",
+            cashoutMultiplier: fb.autoCashout, winAmount,
             createdAt: fb.createdAt,
           },
           user: { id: fb.userId, username: fb.masked },
@@ -230,9 +221,6 @@ export class GameEngine {
     });
   }
 
-  /**
-   * Look up the masked display name for a real user, with in-memory caching.
-   */
   private async getMaskedForUser(userId: number): Promise<string> {
     const cached = this.userMaskCache.get(userId);
     if (cached) return cached;
@@ -242,14 +230,10 @@ export class GameEngine {
     return masked;
   }
 
-  // ────────────────────────────────────────────────
-  // WebSocket
-  // ────────────────────────────────────────────────
   private setupWebSocket() {
     this.wss.on("connection", (ws: Client) => {
       ws.isAlive = true;
       ws.on("pong", () => (ws.isAlive = true));
-
       ws.on("message", (message: string) => {
         try {
           const data = JSON.parse(message.toString());
@@ -257,26 +241,15 @@ export class GameEngine {
             ws.userId = data.userId;
             ws.username = data.username;
           }
-        } catch (err) {
-          console.warn("Invalid WS message:", err);
-        }
+        } catch {}
       });
-
-      ws.send(
-        JSON.stringify({
-          type: wsEvents.SERVER_STATE_UPDATE,
-          payload: this.getStatus(),
-        }),
-      );
+      ws.send(JSON.stringify({ type: wsEvents.SERVER_STATE_UPDATE, payload: this.getStatus() }));
     });
 
     const heartbeatInterval = setInterval(() => {
       this.wss.clients.forEach((ws) => {
         const client = ws as Client;
-        if (!client.isAlive) {
-          client.terminate();
-          return;
-        }
+        if (!client.isAlive) { client.terminate(); return; }
         client.isAlive = false;
         client.ping();
       });
@@ -285,15 +258,10 @@ export class GameEngine {
     this.wss.on("close", () => clearInterval(heartbeatInterval));
   }
 
-  // ────────────────────────────────────────────────
-  // Broadcast Helpers
-  // ────────────────────────────────────────────────
   public broadcast(type: string, payload: any) {
     const message = JSON.stringify({ type, payload });
     this.wss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
+      if (client.readyState === WebSocket.OPEN) client.send(message);
     });
   }
 
@@ -301,15 +269,34 @@ export class GameEngine {
     const message = JSON.stringify({ type, payload });
     this.wss.clients.forEach((client) => {
       const c = client as Client;
-      if (c.readyState === WebSocket.OPEN && c.userId === userId) {
-        c.send(message);
-      }
+      if (c.readyState === WebSocket.OPEN && c.userId === userId) c.send(message);
     });
   }
 
-  // ────────────────────────────────────────────────
-  // Provably-fair crash point — improved distribution
-  // ────────────────────────────────────────────────
+  /**
+   * Provably-fair crash point generator with exciting, varied distribution.
+   *
+   * House edge comes entirely from the bust probability (instantBustChance +
+   * an extra "near-bust" zone controlled by houseLevel). The non-bust portion
+   * always uses the Pareto 1/(1-v) formula, which produces:
+   *
+   *   ~50% of non-bust rounds: 1.0x – 2.0x
+   *   ~30% of non-bust rounds: 2.0x – 5.0x   ← exciting sweet spot
+   *   ~15% of non-bust rounds: 5.0x – 20x    ← big-win feeling
+   *    ~5% of non-bust rounds: 20x – 1000x   ← legendary jackpot
+   *
+   * houseLevel 1-10 adds an extra "near-bust" band (1.01–1.50x) on top of
+   * the instant-bust chance so the admin can dial house profit without making
+   * the game feel rigged (no change to the shape of the exciting tail).
+   *
+   * At default settings (level 5, bustChance 10%):
+   *   ~10%  instant 1.00x bust
+   *   ~10%  near-bust  1.01–1.50x  (houseLevel contribution)
+   *   ~36%  low      1.51–2.00x
+   *   ~24%  medium   2.01–5.00x
+   *   ~12%  high     5.01–20x
+   *    ~8%  jackpot  20x+
+   */
   private generateCrashPoint(): number {
     this.serverSeed = crypto.randomBytes(32).toString("hex");
     this.serverSeedHash = crypto
@@ -318,48 +305,48 @@ export class GameEngine {
       .digest("hex");
     this.nonce++;
 
-    // After too many consecutive high rounds, lean toward a lower crash
-    if (this.consecutiveHighRounds >= CONSECUTIVE_HIGH_MULTIPLIER_LIMIT) {
-      // 60% chance of a controlled low crash (1.0–1.5x) to balance the house
-      if (Math.random() < 0.60) {
-        const low = 1.0 + Math.random() * 0.5;
-        return Math.floor(low * 100) / 100;
-      }
+    const { instantBustChance, consecutiveHighLimit } = gameSettings;
+    // Extra low-crash probability from houseLevel (0% at level 1, 20% at level 10)
+    const extraLow = extraLowProb(gameSettings.houseLevel);
+
+    // Total "low zone" probability. Hard cap at 70% so the game never feels broken.
+    let lowZone = Math.min(0.70, instantBustChance + extraLow);
+
+    // If too many consecutive high rounds, temporarily expand the low zone to recover
+    if (this.consecutiveHighRounds >= consecutiveHighLimit) {
+      lowZone = Math.min(0.90, lowZone + 0.25);
     }
 
     const hmac = crypto.createHmac("sha256", this.serverSeed);
     hmac.update(`${this.clientSeed}:${this.nonce}`);
     const hash = hmac.digest("hex");
-
     const h = parseInt(hash.slice(0, 13), 16);
-    const u = h / Math.pow(2, 52);
+    const u = h / Math.pow(2, 52); // uniform [0, 1)
 
-    // ~12% instant bust at exactly 1.00x
-    if (u < INSTANT_BUST_CHANCE) {
-      return 1.0;
+    // ── Low Zone (instant bust + near-bust) ──────────────────
+    if (u < lowZone) {
+      if (u < instantBustChance) {
+        // Instant 1.00x bust
+        return 1.0;
+      }
+      // Near-bust zone: 1.01x – 1.50x (scaled by how deep into the near-bust band we are)
+      const t = (u - instantBustChance) / (lowZone - instantBustChance);
+      const cp = 1.01 + t * 0.49; // linearly 1.01 → 1.50
+      return Math.floor(cp * 100) / 100;
     }
 
-    // Map remaining distribution through a curve that gives a nice spread:
-    // ~30% between 1.01x – 1.99x  (players lose a lot)
-    // ~25% between 2.00x – 3.99x  (feels exciting)
-    // ~15% between 4.00x – 9.99x  (occasional big wins)
-    //  ~5% above 10x               (rare jackpot feel)
-    const v = (u - INSTANT_BUST_CHANCE) / (1 - INSTANT_BUST_CHANCE);
-    const residualEdge =
-      (HOUSE_EDGE - INSTANT_BUST_CHANCE) / (1 - INSTANT_BUST_CHANCE);
-    const fairFactor = Math.max(0, 1 - residualEdge);
+    // ── Exciting Zone: Pareto 1/(1-v) — always > 1.0x ───────
+    // v is uniform (0, 1), giving crash ∈ (1, ∞)
+    const v = (u - lowZone) / (1 - lowZone);
+    let crash = 1.0 / (1 - v);
 
-    let crashPoint = fairFactor / (1 - v);
+    if (!isFinite(crash) || crash > 1000) crash = 1000;
+    // Minimum for this zone is 1.01x (due to v > 0)
+    if (crash < 1.0) crash = 1.0;
 
-    if (!isFinite(crashPoint) || crashPoint > 1000) crashPoint = 1000;
-    if (crashPoint < 1.0) crashPoint = 1.0;
-
-    return Math.floor(crashPoint * 100) / 100;
+    return Math.floor(crash * 100) / 100;
   }
 
-  // ────────────────────────────────────────────────
-  // Round Lifecycle
-  // ────────────────────────────────────────────────
   private async startNewRound(): Promise<void> {
     try {
       this.clearTimers();
@@ -368,11 +355,8 @@ export class GameEngine {
       this.crashPoint = this.generateCrashPoint();
 
       const round = await storage.createRound(
-        this.crashPoint,
-        this.serverSeed,
-        this.clientSeed,
-        this.nonce,
-        this.serverSeedHash,
+        this.crashPoint, this.serverSeed, this.clientSeed,
+        this.nonce, this.serverSeedHash,
       );
 
       this.currentRoundId = round.id;
@@ -385,7 +369,6 @@ export class GameEngine {
       });
 
       this.seedFakeBets(this.currentRoundId);
-
       this.bettingTimeout = setTimeout(() => this.startGame(), 5000);
     } catch (error) {
       console.error("Failed to start new round:", error);
@@ -413,16 +396,10 @@ export class GameEngine {
       for (const slotStr in this.nextBets[userId]) {
         const slot = Number(slotStr);
         const queued = this.nextBets[userId][slot];
-        this.placeBet(
-          userId,
-          slot,
-          queued.amount,
-          queued.autoCashout,
-          false,
-        ).catch((err) => console.warn("Auto-place queued bet failed:", err));
+        this.placeBet(userId, slot, queued.amount, queued.autoCashout, false)
+          .catch((err) => console.warn("Auto-place queued bet failed:", err));
       }
     }
-
     this.nextBets = {};
   }
 
@@ -449,11 +426,9 @@ export class GameEngine {
 
     if (!this.currentRoundId) return;
 
-    // Trigger fake-player auto-cashouts as the multiplier climbs.
     this.simulateFakeCashouts();
 
     const activeBets = await storage.getActiveBets(this.currentRoundId);
-
     await Promise.all(
       activeBets.map(async (bet) => {
         if (
@@ -463,11 +438,8 @@ export class GameEngine {
           this.multiplier < this.crashPoint &&
           !this.prevRoundWinners.has(bet.userId)
         ) {
-          await this.handleCashout(
-            bet.userId,
-            bet.autoCashout,
-            bet.playerIndex,
-          ).catch((err) => console.warn("Auto-cashout failed:", err));
+          await this.handleCashout(bet.userId, bet.autoCashout, bet.playerIndex)
+            .catch((err) => console.warn("Auto-cashout failed:", err));
         }
       }),
     );
@@ -478,21 +450,15 @@ export class GameEngine {
     this.clearTimers();
 
     if (this.currentRoundId) {
-      await storage.updateRoundStatus(
-        this.currentRoundId,
-        "crashed",
-        new Date(),
-      );
+      await storage.updateRoundStatus(this.currentRoundId, "crashed", new Date());
 
       const activeBets = await storage.getActiveBets(this.currentRoundId);
       await Promise.all(
-        activeBets
-          .filter((b) => b.status === "active")
+        activeBets.filter((b) => b.status === "active")
           .map((b) => storage.updateBetStatus(b.id, "lost")),
       );
     }
 
-    // Track consecutive high multiplier rounds for house balance
     if (this.crashPoint >= 2.0) {
       this.consecutiveHighRounds++;
     } else {
@@ -508,19 +474,12 @@ export class GameEngine {
       timestamp: Date.now(),
     });
 
-    // Roll winner sets
     this.prevRoundWinners = new Set(this.currentRoundWinners);
     this.currentRoundWinners.clear();
-
     this.broadcastState();
     setTimeout(() => this.startNewRound(), 3000);
   }
 
-  private lastCrashPointForLog = 1.0;
-
-  // ────────────────────────────────────────────────
-  // Place Bet
-  // ────────────────────────────────────────────────
   public async placeBet(
     userId: number,
     playerIndex: number,
@@ -532,43 +491,25 @@ export class GameEngine {
     if (playerIndex < 0 || playerIndex > 1) throw new Error("Slot must be 1 or 2");
 
     if (!saveNextBet && this.status !== "betting") {
-      throw new Error(
-        "Cannot place immediate bet now — please queue for the next round",
-      );
+      throw new Error("Cannot place immediate bet now — please queue for the next round");
     }
 
     const newBalance = await storage.adjustWalletBalance(userId, -amount);
-    if (newBalance === null) {
-      throw new Error("Insufficient balance");
-    }
+    if (newBalance === null) throw new Error("Insufficient balance");
 
     await storage.incrementUserWagered(userId, amount);
 
-    const bet = await storage.placeBet(
-      this.currentRoundId,
-      userId,
-      playerIndex,
-      amount,
-      autoCashout,
-    );
-
+    const bet = await storage.placeBet(this.currentRoundId, userId, playerIndex, amount, autoCashout);
     this.realBettorsThisRound.add(userId);
     const masked = await this.getMaskedForUser(userId);
 
-    this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
-      walletBalance: newBalance,
-    });
+    this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, { walletBalance: newBalance });
 
     this.broadcast(wsEvents.SERVER_BET_PLACED, {
       bet: {
-        id: bet.id,
-        roundId: this.currentRoundId,
-        userId: bet.userId,
-        playerIndex,
-        amount: bet.amount,
-        autoCashout: bet.autoCashout ?? null,
-        status: bet.status,
-        createdAt: bet.createdAt ?? Date.now(),
+        id: bet.id, roundId: this.currentRoundId, userId: bet.userId,
+        playerIndex, amount: bet.amount, autoCashout: bet.autoCashout ?? null,
+        status: bet.status, createdAt: bet.createdAt ?? Date.now(),
       },
       user: { id: userId, username: masked },
     });
@@ -581,9 +522,6 @@ export class GameEngine {
     return bet;
   }
 
-  // ────────────────────────────────────────────────
-  // Cashout
-  // ────────────────────────────────────────────────
   public async handleCashout(
     userId: number,
     cashoutValue?: number,
@@ -594,46 +532,31 @@ export class GameEngine {
 
     const activeBets = await storage.getActiveBets(this.currentRoundId);
     const bet = activeBets.find(
-      (b) =>
-        b.userId === userId &&
-        b.status === "active" &&
-        b.playerIndex === playerIndex,
+      (b) => b.userId === userId && b.status === "active" && b.playerIndex === playerIndex,
     );
 
     if (!bet) throw new Error("No active bet found for this slot");
-
     if (this.prevRoundWinners.has(userId)) {
       throw new Error("Cannot win two rounds in a row — cash out next round!");
     }
 
     const cashoutMultiplier = cashoutValue ?? this.multiplier;
-    if (cashoutMultiplier > this.crashPoint + 0.001) {
-      throw new Error("Cashout value exceeds crash point");
-    }
+    if (cashoutMultiplier > this.crashPoint + 0.001) throw new Error("Cashout value exceeds crash point");
 
     const winAmount = Math.floor(bet.amount * cashoutMultiplier);
-
     await storage.updateBetStatus(bet.id, "won", cashoutMultiplier, winAmount);
     const newBalance = await storage.adjustWalletBalance(userId, winAmount);
     const masked = await this.getMaskedForUser(userId);
     this.currentRoundWinners.add(userId);
 
-    this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, {
-      walletBalance: newBalance ?? 0,
-    });
+    this.sendToUser(userId, wsEvents.SERVER_BALANCE_UPDATE, { walletBalance: newBalance ?? 0 });
 
     this.broadcast(wsEvents.SERVER_BET_CASHED_OUT, {
       bet: {
-        id: bet.id,
-        roundId: this.currentRoundId,
-        userId: bet.userId,
-        playerIndex: bet.playerIndex,
-        amount: bet.amount,
-        autoCashout: bet.autoCashout ?? null,
-        status: "won",
-        cashoutMultiplier,
-        winAmount,
-        createdAt: bet.createdAt ?? Date.now(),
+        id: bet.id, roundId: this.currentRoundId, userId: bet.userId,
+        playerIndex: bet.playerIndex, amount: bet.amount,
+        autoCashout: bet.autoCashout ?? null, status: "won",
+        cashoutMultiplier, winAmount, createdAt: bet.createdAt ?? Date.now(),
       },
       user: { id: userId, username: masked },
       timestamp: Date.now(),
@@ -648,7 +571,6 @@ export class GameEngine {
 
   public getStatus() {
     const realOnline = this.wss.clients.size;
-    // Combine real + simulated, capped to 70-130 range
     const onlineCount = Math.min(130, Math.max(70, this.simulatedOnline + realOnline));
     return {
       status: this.status,

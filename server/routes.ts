@@ -2,7 +2,7 @@ import type { Express, Request } from "express";
 import { Server } from "http";
 import { storage } from "./storage";
 import { setupAuth } from "./auth";
-import { GameEngine } from "./game";
+import { GameEngine, gameSettings, updateGameSettings } from "./game";
 import { api, wsEvents } from "@shared/routes";
 import { depositSchema, withdrawSchema } from "@shared/schema";
 import { initiateStkPush, makeReference, getMegaPayConfig } from "./megapay";
@@ -681,6 +681,39 @@ export async function registerRoutes(
       blockReason: blocked ? reason || "Blocked by admin" : null,
     });
     res.json({ ok: true });
+  });
+
+  // ─────────────── Admin: Live Game Settings ───────────────
+  app.get("/api/admin/game-settings", (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
+    res.json(gameSettings);
+  });
+
+  app.post("/api/admin/game-settings", (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin)
+      return res.sendStatus(403);
+    const {
+      houseLevel,
+      instantBustChance,
+      consecutiveHighLimit,
+      fakeMin,
+      fakeMax,
+    } = req.body;
+    const patch: Partial<typeof gameSettings> = {};
+    if (typeof houseLevel === "number" && houseLevel >= 1 && houseLevel <= 10)
+      patch.houseLevel = houseLevel;
+    if (typeof instantBustChance === "number" && instantBustChance >= 0.01 && instantBustChance <= 0.5)
+      patch.instantBustChance = instantBustChance;
+    if (typeof consecutiveHighLimit === "number" && consecutiveHighLimit >= 1 && consecutiveHighLimit <= 10)
+      patch.consecutiveHighLimit = consecutiveHighLimit;
+    if (typeof fakeMin === "number" && fakeMin >= 5)
+      patch.fakeMin = fakeMin;
+    if (typeof fakeMax === "number" && fakeMax >= 10)
+      patch.fakeMax = Math.max(fakeMax, (patch.fakeMin ?? gameSettings.fakeMin) + 5);
+    updateGameSettings(patch);
+    console.log("[admin] game settings updated:", gameSettings);
+    res.json({ ok: true, settings: gameSettings });
   });
 
   return httpServer;
