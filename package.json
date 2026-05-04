@@ -7,11 +7,11 @@
   "description": "Offline REST + Electron app",
   "author": "Your Name",
   "scripts": {
-    "dev": "cross-env NODE_ENV=development tsx server/index.ts",
+    "dev": "NODE_ENV=development tsx server/index.ts",
     "dev:frontend": "vite",
     "build": "tsx script/build.ts",
     "build:frontend": "vite build",
-    "start": "cross-env NODE_ENV=production node dist/index.cjs",
+    "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
     "db:push": "drizzle-kit push"
   },
