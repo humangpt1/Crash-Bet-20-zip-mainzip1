@@ -62,8 +62,29 @@ export function GameCanvas({ gameState }: GameCanvasProps) {
 
       ctx.clearRect(0, 0, width, height);
 
+      // ── Dark blue gradient background ──────────────────────────
+      const bgGrad = ctx.createRadialGradient(
+        width * 0.5, height * 0.3, 0,
+        width * 0.5, height * 0.5, width * 0.8,
+      );
+      bgGrad.addColorStop(0, "rgba(10, 25, 60, 0.85)");
+      bgGrad.addColorStop(0.5, "rgba(6, 15, 40, 0.92)");
+      bgGrad.addColorStop(1, "rgba(2, 8, 24, 0.98)");
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, width, height);
+
+      // Subtle blue radial glow in top-left
+      const glowGrad = ctx.createRadialGradient(
+        width * 0.15, height * 0.15, 0,
+        width * 0.15, height * 0.15, width * 0.45,
+      );
+      glowGrad.addColorStop(0, "rgba(30, 80, 200, 0.12)");
+      glowGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
+      ctx.fillStyle = glowGrad;
+      ctx.fillRect(0, 0, width, height);
+
       // Grid
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+      ctx.strokeStyle = "rgba(80, 130, 255, 0.07)";
       ctx.lineWidth = 1;
       const gridSize = 50;
       const offsetX =
@@ -89,7 +110,7 @@ export function GameCanvas({ gameState }: GameCanvasProps) {
 
         ctx.beginPath();
         ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = "rgba(255,255,255,0.1)";
+        ctx.strokeStyle = "rgba(80, 130, 255, 0.15)";
         ctx.lineWidth = 3;
         ctx.stroke();
 
@@ -152,8 +173,11 @@ export function GameCanvas({ gameState }: GameCanvasProps) {
             ? "rgba(255,42,95,0.7)"
             : "rgba(255,42,95,0.9)";
         ctx.lineWidth = 4;
-        ctx.shadowBlur = 12;
-        ctx.shadowColor = "rgba(255,42,95,0.8)";
+        ctx.shadowBlur = 16;
+        ctx.shadowColor =
+          gameState.status === "crashed"
+            ? "rgba(255,42,95,0.5)"
+            : "rgba(255,42,95,0.9)";
         ctx.stroke();
         ctx.shadowBlur = 0;
 
@@ -162,14 +186,14 @@ export function GameCanvas({ gameState }: GameCanvasProps) {
         ctx.lineTo(50, height);
         ctx.fillStyle =
           gameState.status === "crashed"
-            ? "rgba(255,42,95,0.08)"
-            : "rgba(255,42,95,0.18)";
+            ? "rgba(255,42,95,0.06)"
+            : "rgba(255,42,95,0.14)";
         ctx.fill();
 
         // Plane orientation
         const angle = Math.atan2(currentY - cp1y, currentX - cp1x);
         const planeColor =
-          gameState.status === "crashed" ? "#666666" : "#ff2a5f";
+          gameState.status === "crashed" ? "#555555" : "#ff2a5f";
         drawPlane(ctx, currentX, currentY, angle, planeColor);
       }
 
@@ -185,7 +209,6 @@ export function GameCanvas({ gameState }: GameCanvasProps) {
 
   /**
    * Clean arrowhead-style plane silhouette.
-   * Sleek, minimal, points along +X (forward).
    */
   const drawPlane = (
     ctx: CanvasRenderingContext2D,
@@ -198,23 +221,20 @@ export function GameCanvas({ gameState }: GameCanvasProps) {
     ctx.translate(x, y);
     ctx.rotate(angle);
 
-    // Outer glow
-    ctx.shadowBlur = 20;
+    ctx.shadowBlur = 22;
     ctx.shadowColor = color;
 
-    // Main arrowhead body
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.moveTo(22, 0);          // nose tip
-    ctx.lineTo(-14, -12);       // back-top wing tip
-    ctx.lineTo(-6, 0);          // notch
-    ctx.lineTo(-14, 12);        // back-bottom wing tip
+    ctx.moveTo(22, 0);
+    ctx.lineTo(-14, -12);
+    ctx.lineTo(-6, 0);
+    ctx.lineTo(-14, 12);
     ctx.closePath();
     ctx.fill();
 
-    // Subtle inner highlight
     ctx.shadowBlur = 0;
-    ctx.fillStyle = "rgba(255,255,255,0.25)";
+    ctx.fillStyle = "rgba(255,255,255,0.22)";
     ctx.beginPath();
     ctx.moveTo(18, 0);
     ctx.lineTo(-8, -6);
@@ -223,7 +243,6 @@ export function GameCanvas({ gameState }: GameCanvasProps) {
     ctx.closePath();
     ctx.fill();
 
-    // Cockpit dot
     ctx.fillStyle = "rgba(255,255,255,0.9)";
     ctx.beginPath();
     ctx.arc(8, 0, 1.8, 0, Math.PI * 2);
@@ -235,7 +254,12 @@ export function GameCanvas({ gameState }: GameCanvasProps) {
   return (
     <div
       ref={containerRef}
-      className={`relative w-full h-[350px] md:h-[500px] bg-card rounded-2xl overflow-hidden border border-border shadow-2xl ${gameState.status === "crashed" ? "animate-shake border-destructive/50" : ""}`}
+      className={`relative w-full h-[350px] md:h-[500px] rounded-2xl overflow-hidden border shadow-2xl ${
+        gameState.status === "crashed"
+          ? "animate-shake border-destructive/50"
+          : "border-blue-900/40"
+      }`}
+      style={{ background: "linear-gradient(135deg, #050f28 0%, #080d1f 100%)" }}
     >
       <canvas
         ref={canvasRef}

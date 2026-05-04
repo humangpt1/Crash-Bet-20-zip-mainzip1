@@ -25,9 +25,10 @@ Every newly registered account is credited with **KES 50** (5 000 cents) immedia
 
 The live-bets feed is seeded with synthetic players so the room never looks empty.
 
-- A pool of 80 fake users is built at boot (negative `id`s, randomised Kenyan-formatted phones).
-- Every betting window seeds 22–31 fake bets, dripped over the 5-second window with random delays.
+- A pool of 150 fake users is built at boot (negative `id`s, randomised Kenyan-formatted phones).
+- Every betting window seeds 70–130 fake bets, dripped over the 5-second window with random delays.
 - Bets range KES 10 – 10 000, weighted toward the lower end. ~65 % carry an auto-cashout (1.20x – 6.00x); the rest ride bare.
+- Online count drifts naturally between 70–130 (simulated + real connections).
 - Auto-cashouts fire in real time as the multiplier climbs (broadcast as normal `bet_cashed_out` events).
 - All public broadcasts include a **masked phone** as `user.username` (e.g. `0712****78`) — fake or real, it never leaks the full number.
 - As soon as ≥ 20 distinct **real** players have placed a bet in the current round, every still-pending fake bet is cancelled and no new fakes are broadcast for that round.
